@@ -1,0 +1,95 @@
+from typing import Any, Callable
+
+from .protocol import (
+    Pos,
+    Turn,
+    Unit,
+    WALL_MATERIAL,
+    collect_command,
+    distance,
+    move_command,
+    sell_command,
+    use_command,
+)
+
+STONE_SAFETY_STOCK = 2
+StepToward = Callable[..., Pos | None]
+
+
+def worker_resource_action(
+    turn: Turn,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    step_toward: StepToward,
+) -> bool:
+    """采矿和卖矿的单回合经济决策。"""
+    if role.backpack_full:
+        vendor = nearest_neutral(turn, role, "vendor")
+        if vendor is None:
+            return False
+        if distance(role.pos, vendor) <= 1:
+            sellable = sellable_item(role)
+            if sellable is not None:
+                commands[role.unit_id] = sell_command(sellable)
+                return True
+        step = step_toward(turn, role, vendor, claimed)
+        if step is not None:
+            commands[role.unit_id] = move_command(step)
+            return True
+        return False
+
+    material = best_material(turn, role)
+    mine = nearest_neutral(turn, role, material)
+    if mine is None:
+        return False
+    if distance(role.pos, mine) <= 1:
+        commands[role.unit_id] = collect_command(mine)
+        claimed.add(mine)
+        return True
+    step = step_toward(turn, role, mine, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
+    return False
+
+
+def nearest_neutral(turn: Turn, role: Unit, kind: str) -> Pos | None:
+    points = turn.neutral(kind)
+    return min(points, key=lambda pos: distance(role.pos, pos), default=None)
+
+
+def best_material(turn: Turn, role: Unit) -> str:
+    if stone_count(role) < STONE_SAFETY_STOCK:
+        return WALL_MATERIAL
+    prices = {
+        material: turn.vendor_prices.get(material, 0)
+        for material in ("iron", "copper", "stone")
+    }
+    return max(prices, key=lambda material: (prices[material], material))
+
+
+def sellable_item(role: Unit) -> str | None:
+    for material in ("iron", "copper", "stone"):
+        if material in role.backpack:
+            return material
+    return None
+
+
+def stone_count(role: Unit) -> int:
+    return role.backpack.count(WALL_MATERIAL)
+
+
+def has_stone(role: Unit) -> bool:
+    return stone_count(role) > 0
+
+
+def use_medicine_if_needed(
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    """只在角色生命值过低时消耗药品，避免浪费库存。"""
+    if role.health <= 50 and "medicine" in role.backpack:
+        commands[role.unit_id] = use_command("medicine")
+        return True
+    return False

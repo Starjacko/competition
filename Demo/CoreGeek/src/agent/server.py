@@ -17,11 +17,13 @@ class Handler(BaseHTTPRequestHandler):
             response = decide(payload)
             LOGGER.info("round %s -> %s", payload.get("roundNo"), response)
             body = json.dumps(
-                {"roleCommandMap": response}, ensure_ascii=False,
+                response, ensure_ascii=False,
             ).encode("utf-8")
         except Exception:
             LOGGER.exception("decision failed")
-            body = b'{"roleCommandMap":{}}'
+            body = (
+                b'{"roleCommandMap":{},"prompt":"","executeCmd":""}'
+            )
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

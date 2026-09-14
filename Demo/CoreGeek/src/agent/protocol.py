@@ -95,10 +95,20 @@ class Robot:
     robot_id: int
     pos: Pos
     health: int
+    kind: str
+    abnormal_state: str
+    target_team: str
 
     @classmethod
     def load(cls, raw: dict[str, Any]) -> "Robot":
-        return cls(int(raw["id"]), Pos.load(raw["pos"]), int(raw["health"]))
+        return cls(
+            int(raw.get("id") or 0),
+            Pos.load(raw["pos"]),
+            int(raw.get("health") or 0),
+            str(raw.get("roleType") or ""),
+            str(raw.get("abnormalState") or ""),
+            str(raw.get("targetTeam") or ""),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,13 +120,25 @@ class Turn:
     height: int
     zones: dict[Pos, str]
     ours: tuple[Unit, ...]
+    enemy: tuple[Unit, ...]
     robots: tuple[Robot, ...]
+    tasks: tuple[dict[str, Any], ...]
+    phase_task: str
+    last_action_results: dict[int, bool]
+    last_treasure_result: int
+    llm_response: str
+    official_news: str
+    folk_legends: str
+    last_cmd_result: str
+    vendor_prices: dict[str, int]
+    shop_prices: dict[str, int]
 
     @classmethod
     def load(cls, payload: dict[str, Any]) -> "Turn":
         round_no = int(payload["roundNo"])
         info = payload["mapInfo"]
         team = payload["teamOur"]
+        news = payload.get("worldNews") or {}
         return cls(
             round_no,
             (round_no - 1) % ROUNDS_PER_DAY < DAY_ROUNDS,
@@ -129,9 +151,26 @@ class Turn:
             },
             tuple(Unit.load(role) for role in team.get("roles") or ()),
             tuple(
+                Unit.load(role)
+                for role in (payload.get("teamEnemy") or {}).get("roles") or ()
+            ),
+            tuple(
                 Robot.load(robot)
                 for robot in (payload.get("robot") or {}).get("roles") or ()
             ),
+            tuple(team.get("playerTasks") or ()),
+            str(payload.get("phaseTask") or ""),
+            {
+                int(key): bool(value)
+                for key, value in (payload.get("lastRoundRoleActionResults") or {}).items()
+            },
+            int(payload.get("lastSummonTreasureResult") or 0),
+            str(payload.get("llmResp") or ""),
+            str(news.get("officialNews") or ""),
+            str(news.get("folkLegends") or ""),
+            str(payload.get("lastCmdResult") or ""),
+            _price_map(payload.get("vendorShopList")),
+            _price_map(payload.get("weaponShopList")),
         )
 
     def station(self) -> Unit | None:
@@ -165,6 +204,9 @@ class Turn:
     def walls(self) -> tuple[Unit, ...]:
         return self.alive((WALL,))
 
+    def unit(self, unit_id: int) -> Unit | None:
+        return next((unit for unit in self.ours if unit.unit_id == unit_id), None)
+
     def stone_mines(self) -> tuple[Pos, ...]:
         return tuple(
             pos for pos, kind in self.zones.items() if kind == WALL_MATERIAL
@@ -194,6 +236,24 @@ class Turn:
             cells.add(robot.pos)
         return frozenset(cells)
 
+    def mines(self, material: str | None = None) -> tuple[Pos, ...]:
+        return tuple(
+            pos for pos, kind in self.zones.items()
+            if kind in ("stone", "iron", "copper")
+            and (material is None or kind == material)
+        )
+
+    def neutral(self, kind: str) -> tuple[Pos, ...]:
+        return tuple(pos for pos, value in self.zones.items() if value == kind)
+
+    def task_points(self) -> tuple[tuple[Pos, dict[str, Any]], ...]:
+        points: list[tuple[Pos, dict[str, Any]]] = []
+        for task in self.tasks:
+            raw_pos = task.get("taskPosition")
+            if isinstance(raw_pos, dict):
+                points.append((Pos.load(raw_pos), task))
+        return tuple(points)
+
 
 def move_command(pos: Pos) -> dict[str, Any]:
     return {"action": "move", "targetPos": [pos.dump()]}
@@ -212,4 +272,49 @@ def attack_command(controller_id: int, pos: Pos) -> dict[str, Any]:
         "action": "attack",
         "targetPos": [pos.dump()],
         "controllerId": str(controller_id),
+    }
+
+
+def sell_command(name: str, num: int = 1) -> dict[str, Any]:
+    return {"action": "sell", "name": name, "num": max(1, int(num))}
+
+
+def buy_command(name: str, num: int = 1) -> dict[str, Any]:
+    return {"action": "buy", "name": name, "num": max(1, int(num))}
+
+
+def use_command(name: str, target: Pos | None = None) -> dict[str, Any]:
+    command: dict[str, Any] = {"action": "use", "name": name}
+    if target is not None:
+        command["targetPos"] = [target.dump()]
+    return command
+
+
+def drop_command(name: str) -> dict[str, Any]:
+    return {"action": "drop", "name": name}
+
+
+def accept_task_command() -> dict[str, Any]:
+    return {"action": "acceptTask"}
+
+
+def submit_answer_command(answer: str) -> dict[str, Any]:
+    return {"action": "submitAnswer", "taskAnswer": answer}
+
+
+def summon_treasure_command(target: Pos, items: list[str]) -> dict[str, Any]:
+    return {
+        "action": "summonTreasure",
+        "targetPos": [target.dump()],
+        "item": list(items),
+    }
+
+
+def _price_map(items: Any) -> dict[str, int]:
+    if not isinstance(items, list):
+        return {}
+    return {
+        str(item.get("name")): int(item.get("price") or 0)
+        for item in items
+        if isinstance(item, dict) and item.get("name") is not None
     }
