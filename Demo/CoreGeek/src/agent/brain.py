@@ -28,8 +28,8 @@ from .tasks import pioneer_day
 from .validator import validated_commands
 
 LOGGER = logging.getLogger(__name__)
-TOWER_LOADOUT = ("gatling", "railgun", "rocket")
-STONE_RESERVE_AFTER_WALLS = 10
+TOWER_LOADOUT = ("rocket", "rocket", "rocket")
+STONE_BATCH_TARGET = 10
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1), (0, 1),
@@ -80,7 +80,7 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> str:
         turn.round_no,
         builder.unit_id if builder else None,
         "right" if _front_direction(turn) > 0 else "left",
-        len(missing_walls) + STONE_RESERVE_AFTER_WALLS,
+        min(len(missing_walls), STONE_BATCH_TARGET),
         [
             {"site": site.dump(), "name": name}
             for site, name in missing_towers
@@ -109,7 +109,14 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> str:
         and pioneer.unit_id not in commands
         and not use_medicine_if_needed(pioneer, commands)
     ):
-        return pioneer_day(turn, pioneer, commands, claimed, _step_toward)
+        prompt = pioneer_day(turn, pioneer, commands, claimed, _step_toward)
+        if (
+            pioneer.unit_id not in commands
+            and not prompt
+            and not _has_available_task(turn)
+        ):
+            _upgrade_or_sell_action(turn, pioneer, claimed, commands)
+        return prompt
     return ""
 
 
@@ -138,27 +145,30 @@ def _defense_worker_action(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
 ) -> bool:
-    """防御工先攒够三面墙石头，再建墙、补塔和保持石头储备。"""
-    if missing_walls:
-        needed_stones = len(missing_walls) + STONE_RESERVE_AFTER_WALLS
-        if stone_count(role) >= needed_stones:
-            if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
-                missing_walls.pop(0)
-                return True
-        return worker_resource_action(
-            turn, role, claimed, commands, _step_toward,
-            preferred_material=WALL_MATERIAL,
-        )
-    if stone_count(role) < STONE_RESERVE_AFTER_WALLS:
-        return worker_resource_action(
-            turn, role, claimed, commands, _step_toward,
-            preferred_material=WALL_MATERIAL,
-        )
+    """防御工按小批量石头循环建墙，避免长时间只采不建。"""
     if missing_towers and turn.gold >= WEAPON_BUILD_COST:
         site, name = missing_towers[0]
         if _build_or_walk(turn, role, site, name, claimed, commands):
             missing_towers.pop(0)
             return True
+    if missing_walls:
+        if stone_count(role) > 0:
+            if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
+                missing_walls.pop(0)
+                return True
+        # 一批最多攒 10 个石头，或者只攒够剩余围墙需要的石头。
+        target_stones = min(len(missing_walls), STONE_BATCH_TARGET)
+        if stone_count(role) < target_stones:
+            return worker_resource_action(
+                turn, role, claimed, commands, _step_toward,
+                preferred_material=WALL_MATERIAL,
+            )
+        return worker_resource_action(
+            turn, role, claimed, commands, _step_toward,
+            keep_stone_stock=False,
+        )
+    if _upgrade_or_sell_action(turn, role, claimed, commands):
+        return True
     return worker_resource_action(
         turn, role, claimed, commands, _step_toward,
         keep_stone_stock=False,
@@ -175,14 +185,11 @@ def _economy_worker_action(
     commands: dict[int, dict[str, Any]],
 ) -> bool:
     """经济工主要采高价矿和卖矿，必要时兜底建设。"""
-    if (
-        missing_walls
-        and stone_count(role) < len(missing_walls) + STONE_RESERVE_AFTER_WALLS
-    ):
-        return worker_resource_action(
-            turn, role, claimed, commands, _step_toward,
-            preferred_material=WALL_MATERIAL,
-        )
+    if missing_towers and turn.gold >= WEAPON_BUILD_COST:
+        site, name = missing_towers[0]
+        if _build_or_walk(turn, role, site, name, claimed, commands):
+            missing_towers.pop(0)
+            return True
     if _upgrade_or_sell_action(turn, role, claimed, commands):
         return True
     if should_fallback_build:
@@ -193,7 +200,7 @@ def _economy_worker_action(
                 return True
         if (
             missing_walls
-            and stone_count(role) >= len(missing_walls) + STONE_RESERVE_AFTER_WALLS
+            and stone_count(role) > 0
         ):
             if _build_or_walk(
                 turn, role, missing_walls[0], WALL, claimed, commands,
@@ -203,6 +210,16 @@ def _economy_worker_action(
     return worker_resource_action(
         turn, role, claimed, commands, _step_toward,
         keep_stone_stock=False,
+    )
+
+
+def _has_available_task(turn: Turn) -> bool:
+    if turn.phase_task:
+        return True
+    return any(
+        task.get("isValid")
+        and int(task.get("coldDownRounds") or 0) == 0
+        for _, task in turn.task_points()
     )
 
 
@@ -428,17 +445,18 @@ def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
     ys = [pos.y for pos in footprint]
     front_x = (max(xs) + 1) if front > 0 else (min(xs) - 1)
     preferred = (
-        Pos(front_x, min(ys)),
-        Pos(front_x, max(ys)),
         Pos(front_x, min(ys) - 1),
         Pos(front_x, max(ys) + 1),
+        Pos(front_x + front, min(ys)),
+        Pos(front_x + front, max(ys)),
+        Pos(front_x + front, min(ys) - 2),
+        Pos(front_x + front, max(ys) + 2),
     )
-    candidates = []
-    fallback = tuple(
-        pos for pos in _cells_at_distance(station.pos, 1)
-        if pos not in preferred
-    )
+    selected: list[Pos] = []
+    fallback = tuple(_cells_at_distance(station.pos, 2))
     for pos in (*preferred, *fallback):
+        if any(distance(pos, chosen) <= 1 for chosen in selected):
+            continue
         if not turn.land(pos) or pos in turn.occupied_cells():
             continue
         # 武器建成后角色要站在相邻格控制，提前过滤夜间不可达的位置。
@@ -451,8 +469,10 @@ def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
             for role in turn.controllable()
         )
         if builder_reachable and controller_reachable:
-            candidates.append(pos)
-    return tuple(candidates[:3])
+            selected.append(pos)
+            if len(selected) == len(TOWER_LOADOUT):
+                break
+    return tuple(selected)
 
 
 def _wall_order(turn: Turn) -> tuple[Pos, ...]:
