@@ -219,12 +219,14 @@ def _tower_worker_action(
     step_toward: StepToward,
 ) -> bool:
     """工人先补缺失火箭炮；真正建成时才移除该塔位。"""
-    if plan.missing_towers and plan.tower_build_budget > 0:
-        site, name = plan.missing_towers[0]
+    target = _next_unclaimed_tower(plan.missing_towers, claimed)
+    if target is not None and plan.tower_build_budget > 0:
+        index, site, name = target
         if _build_or_walk(turn, role, site, name, claimed, commands, step_toward):
+            claimed.add(site)
             # 只有 build 才表示该塔本回合会落地；move 只是靠近目标。
             if commands[role.unit_id]["action"] == "build":
-                plan.missing_towers.pop(0)
+                plan.missing_towers.pop(index)
                 plan.tower_build_budget -= 1
             return True
     return _economy_worker_action(
@@ -269,11 +271,13 @@ def _economy_worker_action(
     step_toward: StepToward,
 ) -> bool:
     """通用经济动作：能补塔先补塔，其次升级/批量卖矿，最后继续采矿。"""
-    if missing_towers and turn.gold >= WEAPON_BUILD_COST:
-        site, name = missing_towers[0]
+    target = _next_unclaimed_tower(missing_towers, claimed)
+    if target is not None and turn.gold >= WEAPON_BUILD_COST:
+        index, site, name = target
         if _build_or_walk(turn, role, site, name, claimed, commands, step_toward):
+            claimed.add(site)
             if commands[role.unit_id]["action"] == "build":
-                missing_towers.pop(0)
+                missing_towers.pop(index)
             return True
     if _upgrade_or_sell_action(
         turn, role, claimed, commands, step_toward,
@@ -339,6 +343,17 @@ def _build_or_walk(
         commands[role.unit_id] = move_command(step)
         return True
     return False
+
+
+def _next_unclaimed_tower(
+    missing_towers: list[tuple[Pos, str]],
+    claimed: set[Pos],
+) -> tuple[int, Pos, str] | None:
+    """选择本回合还没有被其他工人认领的塔位。"""
+    for index, (site, name) in enumerate(missing_towers):
+        if site not in claimed:
+            return index, site, name
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -508,12 +523,14 @@ def _nearest_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
 
 
 def _missing_towers(turn: Turn) -> list[tuple[Pos, str]]:
-    """返回还没建成的计划塔位，保持顺序让第三座塔稳定补齐。"""
-    tower_positions = {unit.pos for unit in turn.weapons()}
+    """按实际防御塔数量补到 3 座，避免因历史塔位漂移卡住围墙阶段。"""
+    built_count = len(turn.weapons())
+    needed = max(0, len(TOWER_LOADOUT) - built_count)
+    if needed == 0:
+        return []
     return [
         (site, TOWER_LOADOUT[index])
-        for index, site in enumerate(_tower_sites(turn))
-        if site not in tower_positions
+        for index, site in enumerate(_tower_sites(turn, needed))
     ]
 
 
@@ -523,10 +540,10 @@ def _missing_walls(turn: Turn) -> list[Pos]:
     return [pos for pos in _wall_order(turn) if pos not in wall_positions]
 
 
-def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
-    """规划三座不相邻火箭炮，并确保人白天能建、晚上能走过去控塔。"""
+def _tower_sites(turn: Turn, needed: int) -> tuple[Pos, ...]:
+    """规划缺失火箭炮，并确保人白天能建、晚上能走过去控塔。"""
     station = turn.station()
-    if station is None:
+    if station is None or needed <= 0:
         return ()
     front = _front_direction(turn)
     footprint = turn.footprint(station)
@@ -542,22 +559,28 @@ def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
         Pos(front_x + front, max(ys) + 2),
     )
     selected: list[Pos] = []
-    fallback = tuple(_cells_at_distance(station.pos, 2))
+    fallback = tuple(
+        pos
+        for radius in (2, 3, 4)
+        for pos in _cells_at_distance(station.pos, radius)
+    )
     existing_towers = {tower.pos for tower in turn.weapons()}
     for pos in (*preferred, *fallback):
+        # 新塔不能贴着已有塔或本回合已选塔，避免三座塔挤在一起。
         if any(distance(pos, chosen) <= 1 for chosen in selected):
+            continue
+        if any(distance(pos, tower_pos) <= 1 for tower_pos in existing_towers):
             continue
         if not turn.land(pos):
             continue
-        # 已建成的计划内塔位必须保留，否则下一回合计划会漂移。
-        if pos in turn.occupied_cells() and pos not in existing_towers:
+        if pos in turn.occupied_cells():
             continue
         stands = _neighbours(pos)
         if any(can_reach_any(turn, role, stands) for role in turn.workers()) and any(
             can_reach_any(turn, role, stands) for role in turn.controllable()
         ):
             selected.append(pos)
-            if len(selected) == len(TOWER_LOADOUT):
+            if len(selected) == needed:
                 break
     return tuple(selected)
 
