@@ -12,6 +12,8 @@ _STEPS = (
 
 
 def next_step(turn: Turn, moving: Unit, goal: Pos) -> Pos | None:
+    if moving.pos == goal:
+        return None
     blocked = turn.blocked(moving)
     order = count()
     frontier: list[tuple[int, int, int, Pos]] = [

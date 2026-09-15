@@ -1,6 +1,6 @@
 from typing import Any
 
-from .combat import base_under_pressure, night
+from .combat import night
 from .economy import (
     has_wall_build_stock,
     stone_count,
@@ -36,13 +36,14 @@ def decide(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         turn = Turn.load(payload)
         commands: dict[int, dict[str, Any]] = {}
+        prompt = ""
         if turn.is_day:
-            _day(turn, commands)
+            prompt = _day(turn, commands)
         else:
             night(turn, commands, _step_toward)
         return {
             "roleCommandMap": validated_commands(turn, commands),
-            "prompt": "",
+            "prompt": prompt,
             "executeCmd": "",
         }
     except Exception:
@@ -50,11 +51,7 @@ def decide(payload: dict[str, Any]) -> dict[str, Any]:
         return {"roleCommandMap": {}, "prompt": "", "executeCmd": ""}
 
 
-def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
-    if base_under_pressure(turn):
-        _assign_defensive_moves(turn, commands)
-        return
-
+def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> str:
     tower_positions = {unit.pos for unit in turn.weapons()}
     missing_towers = [
         (site, TOWER_LOADOUT[index])
@@ -90,7 +87,8 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         and pioneer.unit_id not in commands
         and not use_medicine_if_needed(pioneer, commands)
     ):
-        pioneer_day(turn, pioneer, commands, claimed, _step_toward)
+        return pioneer_day(turn, pioneer, commands, claimed, _step_toward)
+    return ""
 
 
 def _defense_worker(

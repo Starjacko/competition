@@ -46,7 +46,7 @@ def worker_resource_action(
     material = preferred_material or best_material(
         turn, role, keep_stone_stock=keep_stone_stock,
     )
-    mine = nearest_neutral(turn, role, material)
+    mine = nearest_neutral(turn, role, material, claimed)
     if mine is None:
         return False
     if distance(role.pos, mine) <= 1:
@@ -56,12 +56,19 @@ def worker_resource_action(
     step = step_toward(turn, role, mine, claimed)
     if step is not None:
         commands[role.unit_id] = move_command(step)
+        claimed.add(mine)
         return True
     return False
 
 
-def nearest_neutral(turn: Turn, role: Unit, kind: str) -> Pos | None:
-    points = turn.neutral(kind)
+def nearest_neutral(
+    turn: Turn,
+    role: Unit,
+    kind: str,
+    claimed: set[Pos] | None = None,
+) -> Pos | None:
+    claimed = claimed or set()
+    points = tuple(pos for pos in turn.neutral(kind) if pos not in claimed)
     return min(points, key=lambda pos: distance(role.pos, pos), default=None)
 
 
