@@ -35,7 +35,7 @@ def night(
                 continue
             targets = attack_targets(turn, tower)
             if targets:
-                commands[controller.unit_id] = attack_command(tower, targets)
+                commands[tower.unit_id] = attack_command(controller, targets)
         else:
             step = step_toward(
                 turn, controller, tower.pos, claimed, inside_only=True,
@@ -108,10 +108,10 @@ def attack_targets(turn: Turn, tower: Unit) -> list[Pos]:
     return [robot.pos for robot in robots[:max(1, count)]]
 
 
-def attack_command(tower: Unit, targets: list[Pos]) -> dict[str, Any]:
+def attack_command(controller: Unit, targets: list[Pos]) -> dict[str, Any]:
     return {
         "action": "attack",
-        "controllerId": str(tower.unit_id),
+        "controllerId": str(controller.unit_id),
         "targetPos": [target.dump() for target in targets],
     }
 

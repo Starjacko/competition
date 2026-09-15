@@ -13,6 +13,7 @@ from .protocol import (
 )
 
 STONE_SAFETY_STOCK = 2
+WALL_BUILD_STONE_STOCK = 2
 StepToward = Callable[..., Pos | None]
 
 
@@ -22,6 +23,9 @@ def worker_resource_action(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
+    *,
+    preferred_material: str | None = None,
+    keep_stone_stock: bool = True,
 ) -> bool:
     """采矿和卖矿的单回合经济决策。"""
     if role.backpack_full:
@@ -39,7 +43,9 @@ def worker_resource_action(
             return True
         return False
 
-    material = best_material(turn, role)
+    material = preferred_material or best_material(
+        turn, role, keep_stone_stock=keep_stone_stock,
+    )
     mine = nearest_neutral(turn, role, material)
     if mine is None:
         return False
@@ -59,12 +65,18 @@ def nearest_neutral(turn: Turn, role: Unit, kind: str) -> Pos | None:
     return min(points, key=lambda pos: distance(role.pos, pos), default=None)
 
 
-def best_material(turn: Turn, role: Unit) -> str:
-    if stone_count(role) < STONE_SAFETY_STOCK:
+def best_material(
+    turn: Turn,
+    role: Unit,
+    *,
+    keep_stone_stock: bool = True,
+) -> str:
+    if keep_stone_stock and stone_count(role) < STONE_SAFETY_STOCK:
         return WALL_MATERIAL
+    materials = ("iron", "copper", "stone") if keep_stone_stock else ("iron", "copper")
     prices = {
         material: turn.vendor_prices.get(material, 0)
-        for material in ("iron", "copper", "stone")
+        for material in materials
     }
     return max(prices, key=lambda material: (prices[material], material))
 
@@ -82,6 +94,10 @@ def stone_count(role: Unit) -> int:
 
 def has_stone(role: Unit) -> bool:
     return stone_count(role) > 0
+
+
+def has_wall_build_stock(role: Unit) -> bool:
+    return stone_count(role) >= WALL_BUILD_STONE_STOCK
 
 
 def use_medicine_if_needed(

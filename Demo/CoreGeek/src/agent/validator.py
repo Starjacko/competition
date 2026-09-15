@@ -8,18 +8,18 @@ def validated_commands(
     commands: dict[int, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for role_id, command in commands.items():
-        role = turn.unit(role_id)
-        if role is not None and role.health > 0 and command_valid(
-            turn, role, command,
+    for actor_id, command in commands.items():
+        actor = turn.unit(actor_id)
+        if actor is not None and actor.health > 0 and command_valid(
+            turn, actor, command,
         ):
-            result[str(role_id)] = command
+            result[str(actor_id)] = command
     return result
 
 
 def command_valid(
     turn: Turn,
-    role: Any,
+    actor: Any,
     command: dict[str, Any],
 ) -> bool:
     action = command.get("action")
@@ -28,8 +28,9 @@ def command_valid(
         "acceptTask", "submitAnswer", "use",
     }:
         return False
-    if action == "attack" and turn.is_day:
-        return False
+    if action == "attack":
+        return _attack_valid(turn, actor, command)
+    role = actor
     if action == "build" and (not turn.is_day or role.kind != "worker"):
         return False
     if action in {"collect", "build"} and role.kind != "worker":
@@ -65,31 +66,41 @@ def command_valid(
             and turn.land(target)
             and target not in turn.occupied_cells()
         )
-    if action == "attack":
-        try:
-            controller_id = int(command.get("controllerId") or 0)
-        except (TypeError, ValueError):
-            return False
-        controller = turn.unit(controller_id)
-        if controller is None or controller.kind not in TOWER_TYPES:
-            return False
-        if distance(role.pos, controller.pos) > 1:
-            return False
-        targets = command["targetPos"]
-        if len(targets) > max(1, controller.level):
-            return False
-        try:
-            return all(
-                distance(controller.pos, Pos.load(target))
-                <= controller.range_of_attack()
-                for target in targets
-            )
-        except (KeyError, TypeError, ValueError):
-            return False
     if action == "use":
         name = command.get("name")
         return isinstance(name, str) and name in role.backpack
     return True
+
+
+def _attack_valid(turn: Turn, weapon: Any, command: dict[str, Any]) -> bool:
+    if turn.is_day or weapon.kind not in TOWER_TYPES:
+        return False
+    positions = command.get("targetPos")
+    if not isinstance(positions, list) or not positions:
+        return False
+    if any(not isinstance(pos, dict) for pos in positions):
+        return False
+    try:
+        controller_id = int(command.get("controllerId") or 0)
+    except (TypeError, ValueError):
+        return False
+    controller = turn.unit(controller_id)
+    if controller is None or controller.kind not in (PIONEER, "worker"):
+        return False
+    if distance(controller.pos, weapon.pos) > 1:
+        return False
+    if weapon.cooldown > 0:
+        return False
+    target_limit = weapon.level if weapon.kind in ("gatling", "rocket") else 1
+    if len(positions) > max(1, target_limit):
+        return False
+    try:
+        return all(
+            distance(weapon.pos, Pos.load(target)) <= weapon.range_of_attack()
+            for target in positions
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _load_target(command: dict[str, Any]) -> Pos | None:

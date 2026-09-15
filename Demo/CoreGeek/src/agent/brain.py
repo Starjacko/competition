@@ -1,7 +1,12 @@
 from typing import Any
 
 from .combat import base_under_pressure, night
-from .economy import has_stone, use_medicine_if_needed, worker_resource_action
+from .economy import (
+    has_wall_build_stock,
+    stone_count,
+    use_medicine_if_needed,
+    worker_resource_action,
+)
 from .grid import can_reach_any, next_step
 from .protocol import (
     PIONEER,
@@ -9,6 +14,7 @@ from .protocol import (
     Turn,
     Unit,
     WALL,
+    WALL_MATERIAL,
     WEAPON_BUILD_COST,
     build_command,
     distance,
@@ -60,29 +66,23 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         pos for pos in _wall_order(turn) if pos not in wall_positions
     ]
     claimed: set[Pos] = set()
+    workers = turn.workers()
+    builder = _defense_worker(turn, workers)
 
-    for role in turn.workers():
+    for role in workers:
         if use_medicine_if_needed(role, commands):
             continue
-        if missing_towers and turn.gold >= WEAPON_BUILD_COST:
-            site, name = missing_towers[0]
-            if _build_or_walk(turn, role, site, name, claimed, commands):
-                missing_towers.pop(0)
-                continue
-        if missing_walls and has_stone(role):
-            if _build_or_walk(
-                turn, role, missing_walls[0], WALL, claimed, commands,
+        if role == builder:
+            if _defense_worker_action(
+                turn, role, missing_towers, missing_walls,
+                claimed, commands,
             ):
-                missing_walls.pop(0)
                 continue
-        if worker_resource_action(
-            turn, role, claimed, commands, _step_toward,
+        elif _economy_worker_action(
+            turn, role, builder is None, missing_towers, missing_walls,
+            claimed, commands,
         ):
             continue
-        if missing_walls and _build_or_walk(
-            turn, role, missing_walls[0], WALL, claimed, commands,
-        ):
-            missing_walls.pop(0)
 
     pioneer = next(iter(turn.alive((PIONEER,))), None)
     if (
@@ -91,6 +91,79 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         and not use_medicine_if_needed(pioneer, commands)
     ):
         pioneer_day(turn, pioneer, commands, claimed, _step_toward)
+
+
+def _defense_worker(
+    turn: Turn,
+    workers: tuple[Unit, ...],
+) -> Unit | None:
+    station = turn.station()
+    station_pos = station.pos if station else Pos(0, 0)
+    return min(
+        workers,
+        key=lambda role: (
+            -stone_count(role),
+            distance(role.pos, station_pos),
+            role.unit_id,
+        ),
+        default=None,
+    )
+
+
+def _defense_worker_action(
+    turn: Turn,
+    role: Unit,
+    missing_towers: list[tuple[Pos, str]],
+    missing_walls: list[Pos],
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    """防御工优先保证炮塔、防线和石头库存。"""
+    if missing_towers and turn.gold >= WEAPON_BUILD_COST:
+        site, name = missing_towers[0]
+        if _build_or_walk(turn, role, site, name, claimed, commands):
+            missing_towers.pop(0)
+            return True
+    if missing_walls and has_wall_build_stock(role):
+        if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
+            missing_walls.pop(0)
+            return True
+    if missing_walls or missing_towers:
+        return worker_resource_action(
+            turn, role, claimed, commands, _step_toward,
+            preferred_material=WALL_MATERIAL,
+        )
+    return worker_resource_action(
+        turn, role, claimed, commands, _step_toward,
+        keep_stone_stock=False,
+    )
+
+
+def _economy_worker_action(
+    turn: Turn,
+    role: Unit,
+    should_fallback_build: bool,
+    missing_towers: list[tuple[Pos, str]],
+    missing_walls: list[Pos],
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    """经济工主要采高价矿和卖矿，必要时兜底建设。"""
+    if should_fallback_build:
+        if missing_towers and turn.gold >= WEAPON_BUILD_COST:
+            site, name = missing_towers[0]
+            if _build_or_walk(turn, role, site, name, claimed, commands):
+                missing_towers.pop(0)
+                return True
+        if missing_walls and has_wall_build_stock(role):
+            if _build_or_walk(
+                turn, role, missing_walls[0], WALL, claimed, commands,
+            ):
+                missing_walls.pop(0)
+                return True
+    return worker_resource_action(
+        turn, role, claimed, commands, _step_toward,
+    )
 
 
 def _assign_defensive_moves(
