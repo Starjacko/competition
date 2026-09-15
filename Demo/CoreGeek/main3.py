@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-# 没有
+# 没
 
 
 def main() -> None:
