@@ -13,7 +13,15 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length)
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            raw_text = raw.decode("utf-8")
+            LOGGER.info("request-raw %s", raw_text)
+            payload = json.loads(raw_text)
+            LOGGER.info(
+                "request-summary round=%s phaseTask=%s llmResp=%s",
+                payload.get("roundNo"),
+                bool(payload.get("phaseTask")),
+                bool(payload.get("llmResp")),
+            )
             response = decide(payload)
             LOGGER.info("round %s -> %s", payload.get("roundNo"), response)
             body = json.dumps(
