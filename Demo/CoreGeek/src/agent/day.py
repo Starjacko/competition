@@ -33,6 +33,9 @@ TOWER_LOADOUT = ("rocket", "rocket", "rocket")
 # 采石不贪多：一次最多准备 10 个石头，够建一批墙就回去施工。
 STONE_BATCH_TARGET = 10
 
+# 普通矿石至少攒一小批再卖，避免“挖一个、卖一个”浪费白天行动。
+ORE_SELL_BATCH_TARGET = 10
+
 # 白天只保留三个顶层状态，日志里也会打印这些值，便于按阶段排查。
 BUILD_TOWERS = "build_towers"
 BUILD_WALLS = "build_walls"
@@ -56,6 +59,7 @@ class DayPlan:
     missing_walls: list[Pos]
     tower_worker: Unit | None
     wall_worker: Unit | None
+    tower_build_budget: int
 
 
 def day(turn: Turn, commands: dict[int, dict[str, Any]], step_toward: StepToward) -> str:
@@ -88,18 +92,13 @@ def _worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    # 状态一：防御塔没满时，塔工补三座不相邻火箭炮。
-    # 墙工只准备一小批石头，不抢建塔目标，避免第三塔卡住。
+    # 状态一：防御塔没满时，两个工人都优先补塔。
+    # 这样开局 75 金币会尽快变成三座火箭炮，而不是有人先跑去建墙。
     if plan.state == BUILD_TOWERS:
-        if role == plan.tower_worker:
-            return _tower_worker_action(
-                turn, role, plan,
-                claimed, commands, step_toward,
-            )
-        if role == plan.wall_worker:
-            return _stone_worker_action(
-                turn, role, plan.missing_walls, claimed, commands, step_toward,
-            )
+        return _tower_worker_action(
+            turn, role, plan,
+            claimed, commands, step_toward,
+        )
 
     # 状态二：塔已满但 C 字墙没满。墙工循环采石/建墙；
     # 其他工人继续卖矿、买券、升级，保证有人把资源花出去。
@@ -138,6 +137,7 @@ def _make_day_plan(turn: Turn) -> DayPlan:
         missing_walls=missing_walls,
         tower_worker=tower_worker,
         wall_worker=wall_worker,
+        tower_build_budget=turn.gold // WEAPON_BUILD_COST,
     )
 
 
@@ -173,12 +173,13 @@ def _log_day_plan(turn: Turn, plan: DayPlan) -> None:
     """打印白天关键状态，方便从日志判断当前为什么采矿、建墙或升级。"""
     LOGGER.info(
         "day-plan round=%s state=%s tower_worker=%s wall_worker=%s front=%s "
-        "wall_stone_need=%s missing_towers=%s missing_walls=%s",
+        "tower_build_budget=%s wall_stone_need=%s missing_towers=%s missing_walls=%s",
         turn.round_no,
         plan.state,
         plan.tower_worker.unit_id if plan.tower_worker else None,
         plan.wall_worker.unit_id if plan.wall_worker else None,
         "right" if _front_direction(turn) > 0 else "left",
+        plan.tower_build_budget,
         min(len(plan.missing_walls), STONE_BATCH_TARGET),
         [{"site": site.dump(), "name": name} for site, name in plan.missing_towers],
         [pos.dump() for pos in plan.missing_walls[:8]],
@@ -217,11 +218,14 @@ def _tower_worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    """塔工先补缺失火箭炮；金币不足或暂时不可建时转经济行为。"""
-    if plan.missing_towers and turn.gold >= WEAPON_BUILD_COST:
+    """工人先补缺失火箭炮；真正建成时才移除该塔位。"""
+    if plan.missing_towers and plan.tower_build_budget > 0:
         site, name = plan.missing_towers[0]
         if _build_or_walk(turn, role, site, name, claimed, commands, step_toward):
-            plan.missing_towers.pop(0)
+            # 只有 build 才表示该塔本回合会落地；move 只是靠近目标。
+            if commands[role.unit_id]["action"] == "build":
+                plan.missing_towers.pop(0)
+                plan.tower_build_budget -= 1
             return True
     return _economy_worker_action(
         turn, role, plan.missing_towers, plan.missing_walls,
@@ -242,7 +246,7 @@ def _stone_worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    """建塔阶段的墙工只准备少量石头，避免前期两个人都挖矿不施工。"""
+    """兜底采石动作：至少攒够一批石头，不再挖一个就切任务。"""
     target_stones = min(max(1, len(missing_walls)), STONE_BATCH_TARGET)
     if stone_count(role) < target_stones:
         return worker_resource_action(
@@ -264,13 +268,17 @@ def _economy_worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    """通用经济动作：能补塔先补塔，其次升级/卖矿/买券，最后采矿。"""
+    """通用经济动作：能补塔先补塔，其次升级/批量卖矿，最后继续采矿。"""
     if missing_towers and turn.gold >= WEAPON_BUILD_COST:
         site, name = missing_towers[0]
         if _build_or_walk(turn, role, site, name, claimed, commands, step_toward):
-            missing_towers.pop(0)
+            if commands[role.unit_id]["action"] == "build":
+                missing_towers.pop(0)
             return True
-    if _upgrade_or_sell_action(turn, role, claimed, commands, step_toward):
+    if _upgrade_or_sell_action(
+        turn, role, claimed, commands, step_toward,
+        sell_batch_target=ORE_SELL_BATCH_TARGET,
+    ):
         return True
     return worker_resource_action(
         turn, role, claimed, commands, step_toward,
@@ -291,8 +299,15 @@ def _wall_worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    """墙工循环执行：有石头就建下一段 C 字墙，石头不足就采一小批。"""
+    """墙工循环执行：先采够本批石头，再连续补 C 字墙。"""
     if missing_walls:
+        target_stones = min(len(missing_walls), STONE_BATCH_TARGET)
+        # 石头不足一批时继续挖，避免“挖一个石头、建一段墙”来回浪费。
+        if stone_count(role) < target_stones:
+            return worker_resource_action(
+                turn, role, claimed, commands, step_toward,
+                preferred_material=WALL_MATERIAL,
+            )
         if stone_count(role) > 0:
             if _build_or_walk(
                 turn, role, missing_walls[0], WALL,
@@ -300,12 +315,6 @@ def _wall_worker_action(
             ):
                 missing_walls.pop(0)
                 return True
-        target_stones = min(len(missing_walls), STONE_BATCH_TARGET)
-        if stone_count(role) < target_stones:
-            return worker_resource_action(
-                turn, role, claimed, commands, step_toward,
-                preferred_material=WALL_MATERIAL,
-            )
     return _economy_worker_action(
         turn, role, [], missing_walls, claimed, commands, step_toward,
     )
@@ -343,8 +352,10 @@ def _upgrade_or_sell_action(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
+    *,
+    sell_batch_target: int = 1,
 ) -> bool:
-    """消费背包和金币：先用升级券，再卖矿，最后买下一张升级券。"""
+    """消费背包和金币：先用升级券，再批量卖矿，最后买下一张升级券。"""
     voucher = _building_voucher_for(role)
     if voucher is not None:
         target = _upgrade_target(turn, role, voucher)
@@ -362,7 +373,12 @@ def _upgrade_or_sell_action(
     sellable = _valuable_ore(role)
     if sellable is not None:
         vendor = _nearest_zone(turn, role, "vendor")
-        if vendor is not None:
+        ore_ready = (
+            role.backpack_full
+            or _item_count(role, sellable) >= sell_batch_target
+            and not _beside_neutral(turn, role, sellable)
+        )
+        if vendor is not None and ore_ready:
             if distance(role.pos, vendor) <= 1:
                 commands[role.unit_id] = sell_command(sellable)
                 return True
@@ -370,6 +386,8 @@ def _upgrade_or_sell_action(
             if step is not None:
                 commands[role.unit_id] = move_command(step)
                 return True
+        if not ore_ready:
+            return False
 
     buy_name = _next_building_voucher(turn)
     if buy_name is None or role.backpack_full:
@@ -434,6 +452,19 @@ def _valuable_ore(role: Unit) -> str | None:
         if name in role.backpack:
             return name
     return None
+
+
+def _item_count(role: Unit, item: str) -> int:
+    """统计背包中特定资源数量，用于批量卖矿阈值判断。"""
+    return role.backpack.count(item)
+
+
+def _beside_neutral(turn: Turn, role: Unit, kind: str) -> bool:
+    """如果还贴着当前矿点，就优先继续挖到这一批结束。"""
+    return any(
+        value == kind and distance(role.pos, pos) <= 1
+        for pos, value in turn.zones.items()
+    )
 
 
 def _next_building_voucher(turn: Turn) -> str | None:
