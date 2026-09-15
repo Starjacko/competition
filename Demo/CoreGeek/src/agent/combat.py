@@ -1,5 +1,6 @@
 from typing import Any, Callable
 
+from .grid import can_reach_any
 from .protocol import (
     Pos,
     Turn,
@@ -23,7 +24,7 @@ def night(
     assigned: set[int] = set()
     roles = list(turn.controllable())
     for tower in turn.weapons():
-        controller = best_controller(tower, roles, assigned)
+        controller = best_controller(turn, tower, roles, assigned)
         if controller is None:
             continue
         assigned.add(controller.unit_id)
@@ -44,20 +45,36 @@ def night(
 
 
 def best_controller(
+    turn: Turn,
     tower: Unit,
     roles: list[Unit],
     assigned: set[int],
 ) -> Unit | None:
     available = [role for role in roles if role.unit_id not in assigned]
-    if not available:
+    reachable = [
+        role for role in available
+        if can_reach_any(turn, role, _tower_stands(tower))
+    ]
+    if not reachable:
         return None
     return min(
-        available,
+        reachable,
         key=lambda role: (
             0 if distance(role.pos, tower.pos) <= 1 else 1,
             distance(role.pos, tower.pos),
             role.unit_id,
         ),
+    )
+
+
+def _tower_stands(tower: Unit) -> tuple[Pos, ...]:
+    return tuple(
+        Pos(tower.pos.x + dx, tower.pos.y + dy)
+        for dx, dy in (
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1), (0, 1),
+            (1, -1), (1, 0), (1, 1),
+        )
     )
 
 

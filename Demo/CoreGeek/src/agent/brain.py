@@ -2,7 +2,7 @@ from typing import Any
 
 from .combat import base_under_pressure, night
 from .economy import has_stone, use_medicine_if_needed, worker_resource_action
-from .grid import next_step
+from .grid import can_reach_any, next_step
 from .protocol import (
     PIONEER,
     Pos,
@@ -166,10 +166,22 @@ def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
     station = turn.station()
     if station is None:
         return ()
-    return tuple(
-        pos for pos in _cells_at_distance(station.pos, 1)
-        if turn.land(pos) and pos not in turn.occupied_cells()
-    )[:3]
+    candidates = []
+    for pos in _cells_at_distance(station.pos, 1):
+        if not turn.land(pos) or pos in turn.occupied_cells():
+            continue
+        # 武器建成后角色要站在相邻格控制，提前过滤夜间不可达的位置。
+        stands = _neighbours(pos)
+        builder_reachable = any(
+            can_reach_any(turn, role, stands) for role in turn.workers()
+        )
+        controller_reachable = any(
+            can_reach_any(turn, role, stands)
+            for role in turn.controllable()
+        )
+        if builder_reachable and controller_reachable:
+            candidates.append(pos)
+    return tuple(candidates[:3])
 
 
 def _wall_order(turn: Turn) -> tuple[Pos, ...]:

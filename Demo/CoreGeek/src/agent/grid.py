@@ -1,4 +1,5 @@
 from heapq import heappop, heappush
+from collections import deque
 from itertools import count
 
 from .protocol import Pos, Turn, Unit, distance
@@ -46,6 +47,34 @@ def next_step(turn: Turn, moving: Unit, goal: Pos) -> Pos | None:
                 ),
             )
     return None
+
+
+def can_reach_any(
+    turn: Turn,
+    moving: Unit,
+    goals: tuple[Pos, ...],
+) -> bool:
+    """检查角色是否能到达任意一个目标站位。"""
+    if not goals:
+        return False
+    blocked = turn.blocked(moving)
+    targets = set(goals)
+    if moving.pos in targets:
+        return True
+
+    frontier = deque([moving.pos])
+    visited = {moving.pos}
+    while frontier:
+        current = frontier.popleft()
+        for dx, dy in _STEPS:
+            step = Pos(current.x + dx, current.y + dy)
+            if step in visited or step in blocked or not turn.land(step):
+                continue
+            if step in targets:
+                return True
+            visited.add(step)
+            frontier.append(step)
+    return False
 
 
 def _first_step(came_from: dict[Pos, Pos], start: Pos, goal: Pos) -> Pos:
