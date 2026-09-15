@@ -35,7 +35,10 @@ def worker_resource_action(
         if distance(role.pos, vendor) <= 1:
             sellable = sellable_item(role)
             if sellable is not None:
-                commands[role.unit_id] = sell_command(sellable)
+                commands[role.unit_id] = sell_command(
+                    sellable,
+                    role.backpack.count(sellable),
+                )
                 return True
         step = step_toward(turn, role, vendor, claimed)
         if step is not None:

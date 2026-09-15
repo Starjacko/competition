@@ -30,8 +30,8 @@ LOGGER = logging.getLogger(__name__)
 # 开局金币优先落三座火箭炮；后续升级也优先围绕防御塔展开。
 TOWER_LOADOUT = ("rocket", "rocket", "rocket")
 
-# 采石不贪多：一次最多准备 10 个石头，够建一批墙就回去施工。
-STONE_BATCH_TARGET = 10
+# 建墙阶段只按剩余墙段计算石头需求，不主动多采；墙完成后最多留 3 个备用石头。
+STONE_SURPLUS_KEEP = 3
 
 # 普通矿石至少攒一小批再卖，避免“挖一个、卖一个”浪费白天行动。
 ORE_SELL_BATCH_TARGET = 10
@@ -180,7 +180,7 @@ def _log_day_plan(turn: Turn, plan: DayPlan) -> None:
         plan.wall_worker.unit_id if plan.wall_worker else None,
         "right" if _front_direction(turn) > 0 else "left",
         plan.tower_build_budget,
-        min(len(plan.missing_walls), STONE_BATCH_TARGET),
+        _wall_stone_target(plan.missing_walls),
         [{"site": site.dump(), "name": name} for site, name in plan.missing_towers],
         [pos.dump() for pos in plan.missing_walls[:8]],
     )
@@ -277,7 +277,7 @@ def _stone_worker_action(
     step_toward: StepToward,
 ) -> bool:
     """兜底采石动作：至少攒够一批石头，不再挖一个就切任务。"""
-    target_stones = min(max(1, len(missing_walls)), STONE_BATCH_TARGET)
+    target_stones = max(1, _wall_stone_target(missing_walls))
     if stone_count(role) < target_stones:
         return worker_resource_action(
             turn, role, claimed, commands, step_toward,
@@ -310,6 +310,7 @@ def _economy_worker_action(
     if _upgrade_or_sell_action(
         turn, role, claimed, commands, step_toward,
         sell_batch_target=ORE_SELL_BATCH_TARGET,
+        keep_stone=STONE_SURPLUS_KEEP if not missing_walls else None,
     ):
         return True
     return worker_resource_action(
@@ -331,10 +332,10 @@ def _wall_worker_action(
     commands: dict[int, dict[str, Any]],
     step_toward: StepToward,
 ) -> bool:
-    """墙工循环执行：先采够本批石头，再连续补 C 字墙。"""
+    """墙工循环执行：先攒够整段围墙石头，再连续把 C 字墙补满。"""
     if missing_walls:
-        target_stones = min(len(missing_walls), STONE_BATCH_TARGET)
-        # 石头不足一批时继续挖，避免“挖一个石头、建一段墙”来回浪费。
+        target_stones = _wall_stone_target(missing_walls)
+        # 石头不足整段围墙需求时继续挖；如果还贴着石矿，就把这个矿点继续挖完。
         if stone_count(role) < target_stones:
             return worker_resource_action(
                 turn, role, claimed, commands, step_toward,
@@ -384,6 +385,11 @@ def _next_unclaimed_tower(
     return None
 
 
+def _wall_stone_target(missing_walls: list[Pos]) -> int:
+    """围墙石头目标：够建剩余墙段即可，不再按 10 个一批来回切换。"""
+    return len(missing_walls)
+
+
 # ---------------------------------------------------------------------------
 # 经济、卖矿和升级
 # ---------------------------------------------------------------------------
@@ -397,6 +403,7 @@ def _upgrade_or_sell_action(
     step_toward: StepToward,
     *,
     sell_batch_target: int = 1,
+    keep_stone: int | None = None,
 ) -> bool:
     """消费背包和金币：先用升级券，再批量卖矿，最后买下一张升级券。"""
     voucher = _building_voucher_for(role)
@@ -413,17 +420,19 @@ def _upgrade_or_sell_action(
             return True
         return False
 
-    sellable = _valuable_ore(role)
+    sellable = _sellable_stack(role, keep_stone=keep_stone)
     if sellable is not None:
+        sell_name, sell_num = sellable
         vendor = _nearest_zone(turn, role, "vendor")
         ore_ready = (
             role.backpack_full
-            or _item_count(role, sellable) >= sell_batch_target
-            and not _beside_neutral(turn, role, sellable)
+            or sell_name == WALL_MATERIAL
+            or sell_num >= sell_batch_target
+            and not _beside_neutral(turn, role, sell_name)
         )
         if vendor is not None and ore_ready:
             if distance(role.pos, vendor) <= 1:
-                commands[role.unit_id] = sell_command(sellable)
+                commands[role.unit_id] = sell_command(sell_name, sell_num)
                 return True
             step = step_toward(turn, role, vendor, claimed)
             if step is not None:
@@ -489,11 +498,19 @@ def _upgrade_target(turn: Turn, role: Unit, voucher: str) -> Unit | None:
     )
 
 
-def _valuable_ore(role: Unit) -> str | None:
-    """石头用于围墙，不主动卖；铜/铁优先变现金币。"""
+def _sellable_stack(
+    role: Unit,
+    *,
+    keep_stone: int | None,
+) -> tuple[str, int] | None:
+    """选择本次要卖的一类矿石，并返回一次性卖出的数量。"""
     for name in ("copper", "iron"):
         if name in role.backpack:
-            return name
+            return name, role.backpack.count(name)
+    if keep_stone is not None:
+        surplus = stone_count(role) - keep_stone
+        if surplus > 0:
+            return WALL_MATERIAL, surplus
     return None
 
 
