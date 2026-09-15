@@ -200,13 +200,41 @@ def _pioneer_action(
     """开拓者优先处理自动化任务；空闲时帮忙卖矿、买券和升级。"""
     pioneer = next(iter(turn.alive((PIONEER,))), None)
     if pioneer is None or pioneer.unit_id in commands:
+        LOGGER.info("pioneer-task round=%s state=unavailable", turn.round_no)
         return ""
     if use_medicine_if_needed(pioneer, commands):
+        LOGGER.info(
+            "pioneer-task round=%s state=use_medicine pioneer=%s",
+            turn.round_no,
+            pioneer.unit_id,
+        )
         return ""
 
     prompt = pioneer_day(turn, pioneer, commands, claimed, step_toward)
-    if pioneer.unit_id not in commands and not prompt and not _has_available_task(turn):
+    if pioneer.unit_id in commands or prompt:
+        LOGGER.info(
+            "pioneer-task round=%s state=task_action pioneer=%s command=%s prompt_len=%s",
+            turn.round_no,
+            pioneer.unit_id,
+            commands.get(pioneer.unit_id),
+            len(prompt),
+        )
+        return prompt
+
+    if not _has_available_task(turn):
         _upgrade_or_sell_action(turn, pioneer, claimed, commands, step_toward)
+        LOGGER.info(
+            "pioneer-task round=%s state=no_task_economy pioneer=%s command=%s",
+            turn.round_no,
+            pioneer.unit_id,
+            commands.get(pioneer.unit_id),
+        )
+    else:
+        LOGGER.info(
+            "pioneer-task round=%s state=task_available_no_path pioneer=%s",
+            turn.round_no,
+            pioneer.unit_id,
+        )
     return prompt
 
 
@@ -528,9 +556,11 @@ def _missing_towers(turn: Turn) -> list[tuple[Pos, str]]:
     needed = max(0, len(TOWER_LOADOUT) - built_count)
     if needed == 0:
         return []
+    existing_towers = {tower.pos for tower in turn.weapons()}
     return [
         (site, TOWER_LOADOUT[index])
         for index, site in enumerate(_tower_sites(turn, needed))
+        if site not in existing_towers
     ]
 
 
@@ -541,23 +571,16 @@ def _missing_walls(turn: Turn) -> list[Pos]:
 
 
 def _tower_sites(turn: Turn, needed: int) -> tuple[Pos, ...]:
-    """规划缺失火箭炮，并确保人白天能建、晚上能走过去控塔。"""
+    """按固定方位规划火箭炮：左上基地右二上一，右下基地左二下一。"""
     station = turn.station()
     if station is None or needed <= 0:
         return ()
-    front = _front_direction(turn)
     footprint = turn.footprint(station)
     xs = [pos.x for pos in footprint]
     ys = [pos.y for pos in footprint]
-    front_x = (max(xs) + 1) if front > 0 else (min(xs) - 1)
-    preferred = (
-        Pos(front_x, min(ys) - 1),
-        Pos(front_x, max(ys) + 1),
-        Pos(front_x + front, min(ys)),
-        Pos(front_x + front, max(ys)),
-        Pos(front_x + front, min(ys) - 2),
-        Pos(front_x + front, max(ys) + 2),
-    )
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    preferred = _fixed_tower_sites(turn, xmin, xmax, ymin, ymax)
     selected: list[Pos] = []
     fallback = tuple(
         pos
@@ -583,6 +606,29 @@ def _tower_sites(turn: Turn, needed: int) -> tuple[Pos, ...]:
             if len(selected) == needed:
                 break
     return tuple(selected)
+
+
+def _fixed_tower_sites(
+    turn: Turn,
+    xmin: int,
+    xmax: int,
+    ymin: int,
+    ymax: int,
+) -> tuple[Pos, ...]:
+    """生成用户指定的三塔布局，顺序也代表建造优先级。"""
+    if _front_direction(turn) > 0:
+        # 基地在左上：右边两座负责正面火力，上面一座补顶部入口。
+        return (
+            Pos(xmax + 1, ymin - 1),
+            Pos(xmax + 1, ymax + 1),
+            Pos(xmin, ymin - 1),
+        )
+    # 基地在右下：左边两座负责正面火力，下面一座补底部入口。
+    return (
+        Pos(xmin - 1, ymin - 1),
+        Pos(xmin - 1, ymax + 1),
+        Pos(xmax, ymax + 1),
+    )
 
 
 def _wall_order(turn: Turn) -> tuple[Pos, ...]:

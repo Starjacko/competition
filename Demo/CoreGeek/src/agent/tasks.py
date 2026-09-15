@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Callable
 
 from .protocol import (
@@ -12,6 +13,7 @@ from .protocol import (
 )
 
 StepToward = Callable[..., Pos | None]
+LOGGER = logging.getLogger(__name__)
 
 
 def pioneer_day(
@@ -23,11 +25,18 @@ def pioneer_day(
 ) -> str:
     """处理开拓者到达任务点、接取任务和提交答案的流程。"""
     if pioneer.kind != PIONEER:
+        LOGGER.info("task-flow state=not_pioneer role=%s", pioneer.unit_id)
         return ""
     if turn.phase_task:
+        LOGGER.info(
+            "task-flow state=continue_task pioneer=%s llm_resp=%s",
+            pioneer.unit_id,
+            bool(turn.llm_response),
+        )
         return _continue_task(turn, pioneer, commands, claimed, step_toward)
     active_task = _active_task(turn)
     if active_task is None:
+        LOGGER.info("task-flow state=no_available_task pioneer=%s", pioneer.unit_id)
         return _continue_task(turn, pioneer, commands, claimed, step_toward)
     task_pos, _ = active_task
     if distance(pioneer.pos, task_pos) <= 1:
@@ -37,10 +46,27 @@ def pioneer_day(
             )
         elif not turn.phase_task:
             commands[pioneer.unit_id] = accept_task_command()
+            LOGGER.info(
+                "task-flow state=accept_task pioneer=%s task_pos=%s",
+                pioneer.unit_id,
+                task_pos.dump(),
+            )
         return _task_prompt(turn)
     step = step_toward(turn, pioneer, task_pos, claimed)
     if step is not None:
         commands[pioneer.unit_id] = move_command(step)
+        LOGGER.info(
+            "task-flow state=move_to_task pioneer=%s task_pos=%s step=%s",
+            pioneer.unit_id,
+            task_pos.dump(),
+            step.dump(),
+        )
+    else:
+        LOGGER.info(
+            "task-flow state=task_unreachable pioneer=%s task_pos=%s",
+            pioneer.unit_id,
+            task_pos.dump(),
+        )
     return ""
 
 
@@ -66,6 +92,11 @@ def _continue_task(
         return ""
     task_points = turn.task_points()
     if not task_points:
+        LOGGER.info(
+            "task-flow state=active_task_no_point pioneer=%s prompt_len=%s",
+            pioneer.unit_id,
+            len(_task_prompt(turn)),
+        )
         return _task_prompt(turn)
     task_pos = min(
         (pos for pos, _ in task_points),
@@ -76,10 +107,35 @@ def _continue_task(
             commands[pioneer.unit_id] = submit_answer_command(
                 turn.llm_response,
             )
+            LOGGER.info(
+                "task-flow state=submit_answer pioneer=%s task_pos=%s answer_len=%s",
+                pioneer.unit_id,
+                task_pos.dump(),
+                len(turn.llm_response),
+            )
+        else:
+            LOGGER.info(
+                "task-flow state=wait_llm pioneer=%s task_pos=%s prompt_len=%s",
+                pioneer.unit_id,
+                task_pos.dump(),
+                len(_task_prompt(turn)),
+            )
         return _task_prompt(turn)
     step = step_toward(turn, pioneer, task_pos, claimed)
     if step is not None:
         commands[pioneer.unit_id] = move_command(step)
+        LOGGER.info(
+            "task-flow state=return_to_task pioneer=%s task_pos=%s step=%s",
+            pioneer.unit_id,
+            task_pos.dump(),
+            step.dump(),
+        )
+    else:
+        LOGGER.info(
+            "task-flow state=active_task_unreachable pioneer=%s task_pos=%s",
+            pioneer.unit_id,
+            task_pos.dump(),
+        )
     return _task_prompt(turn)
 
 
