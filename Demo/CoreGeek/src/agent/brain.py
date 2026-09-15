@@ -4,7 +4,6 @@ from typing import Any
 
 from .combat import night
 from .economy import (
-    has_wall_build_stock,
     stone_count,
     use_medicine_if_needed,
     worker_resource_action,
@@ -30,6 +29,7 @@ from .validator import validated_commands
 
 LOGGER = logging.getLogger(__name__)
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
+STONE_RESERVE_AFTER_WALLS = 10
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1), (0, 1),
@@ -75,9 +75,12 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> str:
     workers = turn.workers()
     builder = _defense_worker(turn, workers)
     LOGGER.info(
-        "day-plan round=%s builder=%s missing_towers=%s missing_walls=%s",
+        "day-plan round=%s builder=%s front=%s wall_stone_need=%s "
+        "missing_towers=%s missing_walls=%s",
         turn.round_no,
         builder.unit_id if builder else None,
+        "right" if _front_direction(turn) > 0 else "left",
+        len(missing_walls) + STONE_RESERVE_AFTER_WALLS,
         [
             {"site": site.dump(), "name": name}
             for site, name in missing_towers
@@ -135,21 +138,27 @@ def _defense_worker_action(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
 ) -> bool:
-    """防御工优先保证迎敌面围墙，再补三种炮塔。"""
-    if missing_walls and has_wall_build_stock(role):
-        if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
-            missing_walls.pop(0)
-            return True
+    """防御工先攒够三面墙石头，再建墙、补塔和保持石头储备。"""
+    if missing_walls:
+        needed_stones = len(missing_walls) + STONE_RESERVE_AFTER_WALLS
+        if stone_count(role) >= needed_stones:
+            if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
+                missing_walls.pop(0)
+                return True
+        return worker_resource_action(
+            turn, role, claimed, commands, _step_toward,
+            preferred_material=WALL_MATERIAL,
+        )
+    if stone_count(role) < STONE_RESERVE_AFTER_WALLS:
+        return worker_resource_action(
+            turn, role, claimed, commands, _step_toward,
+            preferred_material=WALL_MATERIAL,
+        )
     if missing_towers and turn.gold >= WEAPON_BUILD_COST:
         site, name = missing_towers[0]
         if _build_or_walk(turn, role, site, name, claimed, commands):
             missing_towers.pop(0)
             return True
-    if missing_walls or missing_towers:
-        return worker_resource_action(
-            turn, role, claimed, commands, _step_toward,
-            preferred_material=WALL_MATERIAL,
-        )
     return worker_resource_action(
         turn, role, claimed, commands, _step_toward,
         keep_stone_stock=False,
@@ -166,6 +175,14 @@ def _economy_worker_action(
     commands: dict[int, dict[str, Any]],
 ) -> bool:
     """经济工主要采高价矿和卖矿，必要时兜底建设。"""
+    if (
+        missing_walls
+        and stone_count(role) < len(missing_walls) + STONE_RESERVE_AFTER_WALLS
+    ):
+        return worker_resource_action(
+            turn, role, claimed, commands, _step_toward,
+            preferred_material=WALL_MATERIAL,
+        )
     if _upgrade_or_sell_action(turn, role, claimed, commands):
         return True
     if should_fallback_build:
@@ -174,7 +191,10 @@ def _economy_worker_action(
             if _build_or_walk(turn, role, site, name, claimed, commands):
                 missing_towers.pop(0)
                 return True
-        if missing_walls and has_wall_build_stock(role):
+        if (
+            missing_walls
+            and stone_count(role) >= len(missing_walls) + STONE_RESERVE_AFTER_WALLS
+        ):
             if _build_or_walk(
                 turn, role, missing_walls[0], WALL, claimed, commands,
             ):
@@ -447,18 +467,22 @@ def _wall_order(turn: Turn) -> tuple[Pos, ...]:
     front = _front_direction(turn)
     front_x = (xmax + 2) if front > 0 else (xmin - 2)
     back_x = (xmin - 2) if front > 0 else (xmax + 2)
+    horizontal_xs = range(front_x, back_x, -front)
     candidates = [
         *(Pos(front_x, y) for y in range(ymin - 1, ymax + 2)),
-        *(Pos(x, ymin - 2) for x in range(xmin - 2, xmax + 3)),
-        *(Pos(x, ymax + 2) for x in range(xmax + 2, xmin - 3, -1)),
-        *(Pos(back_x, y) for y in range(ymax + 1, ymin - 2, -1)),
+        *(Pos(x, ymin - 2) for x in horizontal_xs),
+        *(Pos(x, ymax + 2) for x in horizontal_xs),
     ]
-    entrance = Pos(back_x, ymin - 1)
+    seen: set[Pos] = set()
+    ordered = []
+    for pos in candidates:
+        if pos not in seen:
+            ordered.append(pos)
+            seen.add(pos)
     return tuple(
-        pos for pos in candidates
+        pos for pos in ordered
         if (
-            pos != entrance
-            and turn.land(pos)
+            turn.land(pos)
             and pos not in turn.occupied_cells()
         )
     )
