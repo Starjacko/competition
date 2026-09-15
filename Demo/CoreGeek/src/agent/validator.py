@@ -25,7 +25,7 @@ def command_valid(
     action = command.get("action")
     if action not in {
         "move", "collect", "build", "attack", "sell",
-        "acceptTask", "submitAnswer", "use",
+        "buy", "acceptTask", "submitAnswer", "use",
     }:
         return False
     if action == "attack":
@@ -37,6 +37,8 @@ def command_valid(
         return False
     if action in {"acceptTask", "submitAnswer"} and role.kind != PIONEER:
         return False
+    if action == "buy":
+        return isinstance(command.get("name"), str)
     if action in {"move", "collect", "build", "attack"}:
         positions = command.get("targetPos")
         if not isinstance(positions, list) or not positions:

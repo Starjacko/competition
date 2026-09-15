@@ -1,3 +1,5 @@
+import json
+import logging
 from typing import Any
 
 from .combat import night
@@ -17,12 +19,16 @@ from .protocol import (
     WALL_MATERIAL,
     WEAPON_BUILD_COST,
     build_command,
+    buy_command,
     distance,
     move_command,
+    sell_command,
+    use_command,
 )
 from .tasks import pioneer_day
 from .validator import validated_commands
 
+LOGGER = logging.getLogger(__name__)
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
@@ -41,13 +47,16 @@ def decide(payload: dict[str, Any]) -> dict[str, Any]:
             prompt = _day(turn, commands)
         else:
             night(turn, commands, _step_toward)
+        valid_commands = validated_commands(turn, commands)
+        _log_turn(turn, commands, valid_commands, prompt)
         return {
-            "roleCommandMap": validated_commands(turn, commands),
+            "roleCommandMap": valid_commands,
             "prompt": prompt,
             "executeCmd": "",
         }
     except Exception:
         # 输入不完整时仍返回协议要求的顶层字段，避免服务端崩溃。
+        LOGGER.exception("decision fallback")
         return {"roleCommandMap": {}, "prompt": "", "executeCmd": ""}
 
 
@@ -65,6 +74,16 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> str:
     claimed: set[Pos] = set()
     workers = turn.workers()
     builder = _defense_worker(turn, workers)
+    LOGGER.info(
+        "day-plan round=%s builder=%s missing_towers=%s missing_walls=%s",
+        turn.round_no,
+        builder.unit_id if builder else None,
+        [
+            {"site": site.dump(), "name": name}
+            for site, name in missing_towers
+        ],
+        [pos.dump() for pos in missing_walls[:8]],
+    )
 
     for role in workers:
         if use_medicine_if_needed(role, commands):
@@ -116,15 +135,15 @@ def _defense_worker_action(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
 ) -> bool:
-    """防御工优先保证炮塔、防线和石头库存。"""
+    """防御工优先保证迎敌面围墙，再补三种炮塔。"""
+    if missing_walls and has_wall_build_stock(role):
+        if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
+            missing_walls.pop(0)
+            return True
     if missing_towers and turn.gold >= WEAPON_BUILD_COST:
         site, name = missing_towers[0]
         if _build_or_walk(turn, role, site, name, claimed, commands):
             missing_towers.pop(0)
-            return True
-    if missing_walls and has_wall_build_stock(role):
-        if _build_or_walk(turn, role, missing_walls[0], WALL, claimed, commands):
-            missing_walls.pop(0)
             return True
     if missing_walls or missing_towers:
         return worker_resource_action(
@@ -147,6 +166,8 @@ def _economy_worker_action(
     commands: dict[int, dict[str, Any]],
 ) -> bool:
     """经济工主要采高价矿和卖矿，必要时兜底建设。"""
+    if _upgrade_or_sell_action(turn, role, claimed, commands):
+        return True
     if should_fallback_build:
         if missing_towers and turn.gold >= WEAPON_BUILD_COST:
             site, name = missing_towers[0]
@@ -161,7 +182,151 @@ def _economy_worker_action(
                 return True
     return worker_resource_action(
         turn, role, claimed, commands, _step_toward,
+        keep_stone_stock=False,
     )
+
+
+def _upgrade_or_sell_action(
+    turn: Turn,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    voucher = _weapon_voucher_for(role)
+    if voucher is not None:
+        target = _upgrade_target(turn, voucher)
+        if target is None:
+            return False
+        if distance(role.pos, target.pos) <= 1:
+            commands[role.unit_id] = use_command(voucher, target.pos)
+            return True
+        step = _step_toward(turn, role, target.pos, claimed)
+        if step is not None:
+            commands[role.unit_id] = move_command(step)
+            return True
+        return False
+
+    sellable = _valuable_ore(role)
+    if sellable is not None:
+        vendor = _nearest_zone(turn, role, "vendor")
+        if vendor is not None:
+            if distance(role.pos, vendor) <= 1:
+                commands[role.unit_id] = sell_command(sellable)
+                return True
+            step = _step_toward(turn, role, vendor, claimed)
+            if step is not None:
+                commands[role.unit_id] = move_command(step)
+                return True
+
+    buy_name = _next_weapon_voucher(turn)
+    if buy_name is None or role.backpack_full:
+        return False
+    price = turn.shop_prices.get(buy_name, 10**9)
+    if turn.gold < price:
+        return False
+    shop = _nearest_zone(turn, role, "weaponShop")
+    if shop is None:
+        return False
+    if distance(role.pos, shop) <= 1:
+        commands[role.unit_id] = buy_command(buy_name)
+        return True
+    step = _step_toward(turn, role, shop, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
+    return False
+
+
+def _weapon_voucher_for(role: Unit) -> str | None:
+    for name in ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"):
+        if name in role.backpack:
+            return name
+    return None
+
+
+def _upgrade_target(turn: Turn, voucher: str) -> Unit | None:
+    target_level = 1 if voucher.endswith("1") else 2
+    return min(
+        (tower for tower in turn.weapons() if tower.level == target_level),
+        key=lambda tower: (tower.pos.x, tower.pos.y),
+        default=None,
+    )
+
+
+def _valuable_ore(role: Unit) -> str | None:
+    for name in ("copper", "iron"):
+        if name in role.backpack:
+            return name
+    return None
+
+
+def _next_weapon_voucher(turn: Turn) -> str | None:
+    if any(tower.level == 1 for tower in turn.weapons()):
+        return "WeaponUpgradeVoucher1"
+    if any(tower.level == 2 for tower in turn.weapons()):
+        return "WeaponUpgradeVoucher2"
+    return None
+
+
+def _nearest_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
+    points = turn.neutral(kind)
+    return min(points, key=lambda pos: distance(role.pos, pos), default=None)
+
+
+def _log_turn(
+    turn: Turn,
+    raw_commands: dict[int, dict[str, Any]],
+    valid_commands: dict[str, dict[str, Any]],
+    prompt: str,
+) -> None:
+    dropped = {
+        str(role_id): command
+        for role_id, command in raw_commands.items()
+        if str(role_id) not in valid_commands
+    }
+    summary = {
+        "round": turn.round_no,
+        "phase": "day" if turn.is_day else "night",
+        "gold": turn.gold,
+        "station": _unit_summary(turn.station()),
+        "workers": [_unit_summary(unit) for unit in turn.workers()],
+        "pioneers": [_unit_summary(unit) for unit in turn.alive((PIONEER,))],
+        "weapons": [_unit_summary(unit) for unit in turn.weapons()],
+        "robots": [
+            {
+                "id": robot.robot_id,
+                "type": robot.kind,
+                "hp": robot.health,
+                "pos": robot.pos.dump(),
+            }
+            for robot in turn.robots
+        ],
+        "task_active": bool(turn.phase_task),
+        "llm_resp": bool(turn.llm_response),
+        "prompt_len": len(prompt),
+        "raw_commands": {
+            str(role_id): command for role_id, command in raw_commands.items()
+        },
+        "valid_commands": valid_commands,
+        "dropped_commands": dropped,
+    }
+    LOGGER.info(
+        "turn-summary %s",
+        json.dumps(summary, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _unit_summary(unit: Unit | None) -> dict[str, Any] | None:
+    if unit is None:
+        return None
+    return {
+        "id": unit.unit_id,
+        "type": unit.kind,
+        "hp": unit.health,
+        "level": unit.level,
+        "pos": unit.pos.dump(),
+        "bag": list(unit.backpack),
+    }
 
 
 def _assign_defensive_moves(
@@ -237,8 +402,23 @@ def _tower_sites(turn: Turn) -> tuple[Pos, ...]:
     station = turn.station()
     if station is None:
         return ()
+    front = _front_direction(turn)
+    footprint = turn.footprint(station)
+    xs = [pos.x for pos in footprint]
+    ys = [pos.y for pos in footprint]
+    front_x = (max(xs) + 1) if front > 0 else (min(xs) - 1)
+    preferred = (
+        Pos(front_x, min(ys)),
+        Pos(front_x, max(ys)),
+        Pos(front_x, min(ys) - 1),
+        Pos(front_x, max(ys) + 1),
+    )
     candidates = []
-    for pos in _cells_at_distance(station.pos, 1):
+    fallback = tuple(
+        pos for pos in _cells_at_distance(station.pos, 1)
+        if pos not in preferred
+    )
+    for pos in (*preferred, *fallback):
         if not turn.land(pos) or pos in turn.occupied_cells():
             continue
         # 武器建成后角色要站在相邻格控制，提前过滤夜间不可达的位置。
@@ -264,13 +444,16 @@ def _wall_order(turn: Turn) -> tuple[Pos, ...]:
     ys = [pos.y for pos in footprint]
     xmin, xmax = min(xs), max(xs)
     ymin, ymax = min(ys), max(ys)
+    front = _front_direction(turn)
+    front_x = (xmax + 2) if front > 0 else (xmin - 2)
+    back_x = (xmin - 2) if front > 0 else (xmax + 2)
     candidates = [
+        *(Pos(front_x, y) for y in range(ymin - 1, ymax + 2)),
         *(Pos(x, ymin - 2) for x in range(xmin - 2, xmax + 3)),
-        *(Pos(xmax + 2, y) for y in range(ymin - 1, ymax + 2)),
         *(Pos(x, ymax + 2) for x in range(xmax + 2, xmin - 3, -1)),
-        *(Pos(xmin - 2, y) for y in range(ymax + 1, ymin - 2, -1)),
+        *(Pos(back_x, y) for y in range(ymax + 1, ymin - 2, -1)),
     ]
-    entrance = Pos(xmax + 2, ymin - 1)
+    entrance = Pos(back_x, ymin - 1)
     return tuple(
         pos for pos in candidates
         if (
@@ -279,6 +462,13 @@ def _wall_order(turn: Turn) -> tuple[Pos, ...]:
             and pos not in turn.occupied_cells()
         )
     )
+
+
+def _front_direction(turn: Turn) -> int:
+    station = turn.station()
+    if station is None:
+        return 1
+    return 1 if station.pos.x < turn.width // 2 else -1
 
 
 def _cells_at_distance(station_pos: Pos, radius: int) -> tuple[Pos, ...]:

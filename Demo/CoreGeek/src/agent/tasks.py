@@ -24,6 +24,8 @@ def pioneer_day(
     """处理开拓者到达任务点、接取任务和提交答案的流程。"""
     if pioneer.kind != PIONEER:
         return ""
+    if turn.phase_task:
+        return _continue_task(turn, pioneer, commands, claimed, step_toward)
     active_task = _active_task(turn)
     if active_task is None:
         return _continue_task(turn, pioneer, commands, claimed, step_toward)
@@ -85,7 +87,8 @@ def _task_prompt(turn: Turn) -> str:
     if not turn.phase_task or turn.llm_response:
         return ""
     return (
-        "请完成下面的游戏自进化任务。只输出可以直接提交的最终答案，"
-        "不要添加解释、步骤或多余文本。\n\n"
+        "你正在参加游戏里的自进化任务。请根据任务要求完成推理或生成答案。"
+        "如果任务要求查询、计算、解析文本或总结，请直接给出可提交的最终答案；"
+        "如果任务明确要求固定格式，请严格按该格式输出。不要输出解释、步骤或多余文本。\n\n"
         f"{turn.phase_task}"
     )

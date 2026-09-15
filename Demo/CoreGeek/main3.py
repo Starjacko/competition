@@ -12,11 +12,19 @@ def main() -> None:
     root = Path(__file__).resolve().parent
     os.chdir(root)
     sys.path.insert(0, str(root / "src"))
+    log_dir = root / "logs"
+    log_dir.mkdir(exist_ok=True)
 
     logging.basicConfig(
-        stream=sys.stdout,
         level=logging.INFO,
         format="%(asctime)s | %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(
+                log_dir / "agent.log",
+                encoding="utf-8",
+            ),
+        ],
     )
 
     from agent.server import serve

@@ -2,3 +2,4 @@
 __pycache__/
 *.py[cod]
 Demo/CoreGeek/.idea/
+Demo/CoreGeek/logs/
