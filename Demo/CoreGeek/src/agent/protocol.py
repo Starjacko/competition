@@ -15,6 +15,9 @@ WORKER = "worker"
 PIONEER = "pioneer"
 TOWER_TYPES = ("gatling", "railgun", "rocket")
 CONTROLLABLE_TYPES = (WORKER, PIONEER)
+MAX_HEALTH_BY_KIND = {WORKER: (220,), PIONEER: (200,), STATION: (1500, 3000, 4500),
+                      WALL: (1000, 1500, 2000), "gatling": (1000, 1500, 2000),
+                      "railgun": (1000, 1500, 2000), "rocket": (1000, 1500, 2000)}
 TOWER_RANGE_BY_LEVEL = {
     "gatling": (3, 5, 7),
     "railgun": (6, 8, 10),
@@ -89,6 +92,18 @@ class Unit:
             return 0
         level = min(max(self.level, 1), len(table))
         return table[level - 1]
+
+    @property
+    def max_health(self) -> int:
+        values = MAX_HEALTH_BY_KIND.get(self.kind)
+        if values is None:
+            return self.health
+        level = min(max(self.level, 1), len(values))
+        return values[level - 1]
+
+    @property
+    def damaged(self) -> bool:
+        return self.health < self.max_health
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +238,7 @@ class Turn:
 
     def occupied_cells(self) -> frozenset[Pos]:
         cells: set[Pos] = set()
-        for unit in self.ours:
+        for unit in (*self.ours, *self.enemy_roles):
             cells.update(self.footprint(unit))
         return frozenset(cells)
 

@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from agent.brain import decide  # noqa: E402
 from agent.protocol import (  # noqa: E402
     Pos,
+    Turn,
     accept_task_command,
     buy_command,
     drop_command,
@@ -21,8 +22,11 @@ from agent.protocol import (  # noqa: E402
 
 
 class AgentTest(unittest.TestCase):
+    def sample(self) -> dict:
+        return json.loads((Path(__file__).parents[3] / "docs" / "request.txt").read_text(encoding="utf-8"))
+
     def test_sample_request_produces_commands(self) -> None:
-        payload = json.loads((Path(__file__).parents[3] / "docs" / "request.txt").read_text(encoding="utf-8"))
+        payload = self.sample()
         response = {"roleCommandMap": decide(payload)}
         self.assertIsInstance(response["roleCommandMap"], dict)
         for command in response["roleCommandMap"].values():
@@ -42,6 +46,62 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(summon_treasure_command(Pos(1, 2), ("StarSand",))["item"], ["StarSand"])
         self.assertEqual(use_command("Medicine"), {"action": "use", "name": "Medicine"})
         self.assertEqual(drop_command("stone"), {"action": "drop", "name": "stone"})
+
+    def test_enemy_unit_blocks_movement(self) -> None:
+        payload = self.sample()
+        payload["teamEnemy"]["roles"].append({
+            "id": 20010, "pos": {"x": 6, "y": 23}, "roleType": "worker",
+            "health": 220, "attackPower": 0, "attackRange": 0,
+            "backPackCapability": 100, "backpack": [],
+        })
+        self.assertIn(Pos(6, 23), Turn.load(payload).blocked(Turn.load(payload).workers()[0]))
+
+    def test_medicine_is_used_before_other_worker_action(self) -> None:
+        payload = self.sample()
+        worker = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "worker")
+        worker["health"] = 100
+        worker["backpack"] = ["Medicine"]
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {"action": "use", "name": "Medicine"})
+
+    def test_worker_with_ore_walks_to_vendor_before_mining_more(self) -> None:
+        payload = self.sample()
+        payload["teamOur"]["roles"] = [
+            role for role in payload["teamOur"]["roles"] if role["roleType"] != "station"
+        ]
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10012)
+        worker["backpack"] = ["iron"]
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])]["action"], "move")
+
+    def test_wall_fixer_is_used_when_adjacent_to_damaged_wall(self) -> None:
+        payload = self.sample()
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 5, "y": 19}
+        worker["backpack"] = ["WallFixer"]
+        wall = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "wall")
+        wall["health"] = 500
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "use", "name": "WallFixer", "targetPos": [wall["pos"]],
+        })
+
+    def test_gatling_targets_stay_within_right_angle(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        payload["robot"]["roles"] = [
+            {"id": 1, "pos": {"x": 11, "y": 24}, "health": 40, "targetTeam": "challenger"},
+            {"id": 2, "pos": {"x": 10, "y": 25}, "health": 40, "targetTeam": "challenger"},
+            {"id": 3, "pos": {"x": 7, "y": 24}, "health": 40, "targetTeam": "challenger"},
+        ]
+        gatling = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "gatling")
+        gatling["level"] = 3
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 8, "y": 24}
+        response = decide(payload)
+        targets = response[str(gatling["id"])]["targetPos"]
+        self.assertLessEqual(len(targets), 3)
+        self.assertNotIn({"x": 7, "y": 24}, targets)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from .protocol import (
     move_command,
     sell_command,
     station_footprint,
+    use_command,
 )
 
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
@@ -53,6 +54,8 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     claimed: set[Pos] = set()
     planned_gold = turn.gold
     for role in turn.workers():
+        if _maintain(turn, role, commands):
+            continue
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
             planned_gold,
@@ -122,6 +125,13 @@ def _trade_or_mine(
             if amount:
                 commands[role.unit_id] = sell_command(ore, amount)
                 return
+    if any(role.backpack.count(ore) for ore in ORE_TYPES):
+        vendor_target = _nearest_zone(turn, role, "vendor")
+        if vendor_target is not None:
+            step = _step_toward(turn, role, vendor_target, claimed)
+            if step is not None:
+                commands[role.unit_id] = move_command(step)
+                return
     _mine(turn, role, claimed, commands, ORE_TYPES)
 
 
@@ -133,11 +143,31 @@ def _adjacent_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
     return min(positions, key=lambda pos: (distance(role.pos, pos), pos.x, pos.y), default=None)
 
 
+def _nearest_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
+    positions = [pos for pos, zone_kind in turn.zones.items() if zone_kind == kind]
+    return min(positions, key=lambda pos: (distance(role.pos, pos), pos.x, pos.y), default=None)
+
+
+def _maintain(turn: Turn, role: Unit, commands: dict[int, dict[str, Any]]) -> bool:
+    if role.damaged and "Medicine" in role.backpack:
+        commands[role.unit_id] = use_command("Medicine")
+        return True
+    if "WallFixer" not in role.backpack:
+        return False
+    damaged_walls = [wall for wall in turn.walls() if wall.damaged]
+    if not damaged_walls:
+        return False
+    target = min(damaged_walls, key=lambda wall: distance(role.pos, wall.pos))
+    if distance(role.pos, target.pos) <= 1:
+        commands[role.unit_id] = use_command("WallFixer", target.pos)
+        return True
+    return False
+
+
 def _pioneer_task(turn: Turn, commands: dict[int, dict[str, Any]], claimed: set[Pos]) -> None:
     pioneers = turn.alive((PIONEER,))
     if not pioneers or turn.phase_task:
         return
-    prefix = f"{turn.team_type}TaskPoint"
     tasks = [
         task for task in turn.player_tasks
         if task.get("isValid") and str(task.get("taskType") or "")
@@ -169,6 +199,8 @@ def _adjacent_mine(turn: Turn, role: Unit) -> Pos | None:
 def _night(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     claimed: set[Pos] = set()
     for role, tower in _tower_pairs(turn):
+        if _maintain(turn, role, commands):
+            continue
         if distance(role.pos, tower.pos) <= 1:
             if tower.cooldown > 0:
                 continue
@@ -191,9 +223,29 @@ def _attack_targets(turn: Turn, tower: Unit) -> tuple[Pos, ...]:
         robot for robot in turn.robots
         if robot.health > 0 and distance(tower.pos, robot.pos) <= reach
     ]
+    threatening = [robot for robot in targets if robot.target_team == turn.team_type]
+    targets = threatening or targets
     targets.sort(key=lambda robot: (distance(tower.pos, robot.pos), robot.robot_id))
     count = tower.level if tower.kind in ("gatling", "rocket") else 1
+    if tower.kind == "gatling":
+        return _gatling_targets(tower, targets, count)
     return tuple(robot.pos for robot in targets[:count])
+
+
+def _gatling_targets(tower: Unit, robots: list[Any], count: int) -> tuple[Pos, ...]:
+    selected: list[Pos] = []
+    for robot in robots:
+        if all(_within_right_angle(tower.pos, robot.pos, other) for other in selected):
+            selected.append(robot.pos)
+        if len(selected) == count:
+            break
+    return tuple(selected)
+
+
+def _within_right_angle(origin: Pos, first: Pos, second: Pos) -> bool:
+    first_x, first_y = first.x - origin.x, first.y - origin.y
+    second_x, second_y = second.x - origin.x, second.y - origin.y
+    return first_x * second_x + first_y * second_y >= 0
 
 
 def _build_or_walk(
