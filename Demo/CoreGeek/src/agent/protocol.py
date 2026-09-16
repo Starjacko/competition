@@ -267,6 +267,11 @@ def build_command(pos: Pos, name: str) -> dict[str, Any]:
     return {"action": "build", "targetPos": [pos.dump()], "name": name}
 
 
+def remove_command(pos: Pos) -> dict[str, Any]:
+    """拆除一段围墙，拆除后该位置下一回合可重新建造。"""
+    return {"action": "remove", "targetPos": [pos.dump()]}
+
+
 def attack_command(controller_id: int, pos: Pos) -> dict[str, Any]:
     return {
         "action": "attack",

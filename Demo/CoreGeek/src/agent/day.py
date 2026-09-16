@@ -9,6 +9,8 @@ from .economy import (
 )
 from .grid import can_reach_any
 from .protocol import (
+    DAY_ROUNDS,
+    NIGHT_ROUNDS,
     PIONEER,
     Pos,
     Turn,
@@ -20,6 +22,7 @@ from .protocol import (
     buy_command,
     distance,
     move_command,
+    remove_command,
     sell_command,
     use_command,
 )
@@ -33,11 +36,19 @@ TOWER_LOADOUT = ("rocket", "rocket", "rocket")
 # 建墙阶段只按剩余墙段计算石头需求，不主动多采；墙完成后最多留 3 个备用石头。
 STONE_SURPLUS_KEEP = 3
 
+# 围墙满血为 1000；严格低于 60%（600）时拆除重建，避免带伤墙段继续拖累防线。
+WALL_MAX_HEALTH = 1000
+WALL_REBUILD_HEALTH = WALL_MAX_HEALTH * 60 // 100
+
 # 普通矿石至少攒一小批再卖，避免“挖一个、卖一个”浪费白天行动。
 ORE_SELL_BATCH_TARGET = 10
 
-# 白天只保留三个顶层状态，日志里也会打印这些值，便于按阶段排查。
+# 白天最后 5 回合进入回防阶段，给夜战留下稳定的炮塔操作人员。
+RETURN_TO_TOWER_ROUNDS = 5
+
+# 白天按四个顶层状态推进，日志里也会打印当前状态，便于按阶段排查。
 BUILD_TOWERS = "build_towers"
+REBUILD_WALLS = "rebuild_walls"
 BUILD_WALLS = "build_walls"
 UPGRADE_BUILDINGS = "upgrade_buildings"
 
@@ -57,6 +68,7 @@ class DayPlan:
     state: str
     missing_towers: list[tuple[Pos, str]]
     missing_walls: list[Pos]
+    damaged_walls: list[Unit]
     tower_worker: Unit | None
     wall_worker: Unit | None
     tower_build_budget: int
@@ -71,6 +83,12 @@ def day(
     claimed: set[Pos] = set()
     plan = _make_day_plan(turn)
     _log_day_plan(turn, plan)
+
+    # 白天收尾阶段不再发起远距离采集或建筑动作，确保角色能在夜晚
+    # 开始前回到炮塔旁边，避免夜战第一回合还在路上。
+    if _should_return_to_towers(turn):
+        _return_to_towers(turn, commands, claimed, step_toward)
+        return TaskAction()
 
     for role in turn.workers():
         if use_medicine_if_needed(role, commands):
@@ -106,6 +124,11 @@ def _worker_action(
 
     # 状态二：塔已满但 C 字墙没满。墙工循环采石/建墙；
     # 其他工人继续卖矿、买券、升级，保证有人把资源花出去。
+    if plan.state == REBUILD_WALLS and role == plan.wall_worker:
+        return _wall_rebuild_action(
+            turn, role, plan.damaged_walls, claimed, commands, step_toward,
+        )
+
     if plan.state == BUILD_WALLS and role == plan.wall_worker:
         return _wall_worker_action(
             turn, role, plan.missing_walls, claimed, commands, step_toward,
@@ -120,11 +143,14 @@ def _worker_action(
 
 def _day_state(
     missing_towers: list[tuple[Pos, str]],
+    damaged_walls: list[Unit],
     missing_walls: list[Pos],
 ) -> str:
     """根据缺失建筑决定白天阶段，保证策略不会在多个目标之间乱跳。"""
     if missing_towers:
         return BUILD_TOWERS
+    if damaged_walls:
+        return REBUILD_WALLS
     if missing_walls:
         return BUILD_WALLS
     return UPGRADE_BUILDINGS
@@ -133,12 +159,14 @@ def _day_state(
 def _make_day_plan(turn: Turn) -> DayPlan:
     """生成本回合的白天计划：缺什么建筑、谁负责塔、谁负责墙。"""
     missing_towers = _missing_towers(turn)
+    damaged_walls = _damaged_walls(turn)
     missing_walls = _missing_walls(turn)
     tower_worker, wall_worker = _worker_roles(turn, turn.workers())
     return DayPlan(
-        state=_day_state(missing_towers, missing_walls),
+        state=_day_state(missing_towers, damaged_walls, missing_walls),
         missing_towers=missing_towers,
         missing_walls=missing_walls,
+        damaged_walls=damaged_walls,
         tower_worker=tower_worker,
         wall_worker=wall_worker,
         tower_build_budget=turn.gold // WEAPON_BUILD_COST,
@@ -177,7 +205,8 @@ def _log_day_plan(turn: Turn, plan: DayPlan) -> None:
     """打印白天关键状态，方便从日志判断当前为什么采矿、建墙或升级。"""
     LOGGER.info(
         "day-plan round=%s state=%s tower_worker=%s wall_worker=%s front=%s "
-        "tower_build_budget=%s wall_stone_need=%s missing_towers=%s missing_walls=%s",
+        "tower_build_budget=%s wall_stone_need=%s damaged_walls=%s "
+        "missing_towers=%s missing_walls=%s",
         turn.round_no,
         plan.state,
         plan.tower_worker.unit_id if plan.tower_worker else None,
@@ -185,6 +214,10 @@ def _log_day_plan(turn: Turn, plan: DayPlan) -> None:
         "right" if _front_direction(turn) > 0 else "left",
         plan.tower_build_budget,
         _wall_stone_target(plan.missing_walls),
+        [
+            {"pos": wall.pos.dump(), "hp": wall.health}
+            for wall in plan.damaged_walls
+        ],
         [{"site": site.dump(), "name": name} for site, name in plan.missing_towers],
         [pos.dump() for pos in plan.missing_walls[:8]],
     )
@@ -193,6 +226,86 @@ def _log_day_plan(turn: Turn, plan: DayPlan) -> None:
 # ---------------------------------------------------------------------------
 # 工人和开拓者动作
 # ---------------------------------------------------------------------------
+
+
+def _should_return_to_towers(turn: Turn) -> bool:
+    """判断是否进入白天最后 5 回合的回防阶段。"""
+    cycle_round = (turn.round_no - 1) % (DAY_ROUNDS + NIGHT_ROUNDS)
+    remaining_day_rounds = DAY_ROUNDS - 1 - cycle_round
+    return (
+        turn.is_day
+        and 0 <= remaining_day_rounds < RETURN_TO_TOWER_ROUNDS
+        and bool(turn.weapons())
+    )
+
+
+def _return_to_towers(
+    turn: Turn,
+    commands: dict[int, dict[str, Any]],
+    claimed: set[Pos],
+    step_toward: StepToward,
+) -> None:
+    """为每个可控角色分配一座可到达的炮塔，并移动到其相邻位置。"""
+    towers = turn.weapons()
+    assigned_towers: set[int] = set()
+
+    for role in turn.controllable():
+        if use_medicine_if_needed(role, commands):
+            LOGGER.info(
+                "day-return state=medicine round=%s role=%s",
+                turn.round_no,
+                role.unit_id,
+            )
+            continue
+        candidates = sorted(
+            (
+                tower for tower in towers
+                if tower.unit_id not in assigned_towers
+                and can_reach_any(turn, role, _neighbours(tower.pos))
+            ),
+            key=lambda tower: (
+                distance(role.pos, tower.pos),
+                tower.pos.x,
+                tower.pos.y,
+                tower.unit_id,
+            ),
+        )
+        tower = candidates[0] if candidates else None
+        if tower is None:
+            LOGGER.warning(
+                "day-return state=unreachable round=%s role=%s",
+                turn.round_no,
+                role.unit_id,
+            )
+            continue
+
+        assigned_towers.add(tower.unit_id)
+        if distance(role.pos, tower.pos) <= 1:
+            LOGGER.info(
+                "day-return state=ready round=%s role=%s tower=%s",
+                turn.round_no,
+                role.unit_id,
+                tower.unit_id,
+            )
+            continue
+
+        step = step_toward(turn, role, tower.pos, claimed)
+        if step is not None:
+            commands[role.unit_id] = move_command(step)
+            LOGGER.info(
+                "day-return state=move round=%s role=%s tower=%s step=%s",
+                turn.round_no,
+                role.unit_id,
+                tower.unit_id,
+                step.dump(),
+            )
+        else:
+            LOGGER.warning(
+                "day-return state=no_step round=%s role=%s tower=%s",
+                turn.round_no,
+                role.unit_id,
+                tower.unit_id,
+            )
 
 
 def _pioneer_action(
@@ -357,6 +470,52 @@ def _wall_worker_action(
     return _economy_worker_action(
         turn, role, [], missing_walls, claimed, commands, step_toward,
     )
+
+
+def _wall_rebuild_action(
+    turn: Turn,
+    role: Unit,
+    damaged_walls: list[Unit],
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    step_toward: StepToward,
+) -> bool:
+    """低血围墙先拆除，下一回合由普通建墙流程用石头重建。"""
+    target = min(
+        damaged_walls,
+        key=lambda wall: (
+            wall.health,
+            distance(role.pos, wall.pos),
+            wall.pos.x,
+            wall.pos.y,
+        ),
+        default=None,
+    )
+    if target is None:
+        return False
+    if distance(role.pos, target.pos) <= 1:
+        commands[role.unit_id] = remove_command(target.pos)
+        claimed.add(target.pos)
+        LOGGER.info(
+            "wall-rebuild state=remove round=%s worker=%s pos=%s hp=%s",
+            turn.round_no,
+            role.unit_id,
+            target.pos.dump(),
+            target.health,
+        )
+        return True
+    step = step_toward(turn, role, target.pos, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
+    LOGGER.warning(
+        "wall-rebuild state=unreachable round=%s worker=%s pos=%s hp=%s",
+        turn.round_no,
+        role.unit_id,
+        target.pos.dump(),
+        target.health,
+    )
+    return False
 
 
 def _build_or_walk(
@@ -593,6 +752,18 @@ def _missing_walls(turn: Turn) -> list[Pos]:
     return [pos for pos in _wall_order(turn) if pos not in wall_positions]
 
 
+def _damaged_walls(turn: Turn) -> list[Unit]:
+    """筛选低于 60% 血量的 C 字墙，后方墙不在规划内也不会触发重建。"""
+    planned = set(_wall_order(turn))
+    return sorted(
+        (
+            wall for wall in turn.walls()
+            if wall.pos in planned and wall.health < WALL_REBUILD_HEALTH
+        ),
+        key=lambda wall: (wall.health, wall.pos.x, wall.pos.y),
+    )
+
+
 def _tower_sites(turn: Turn, needed: int) -> tuple[Pos, ...]:
     """按固定方位规划火箭炮：左上基地右二上一，右下基地左二下一。"""
     station = turn.station()
@@ -667,7 +838,9 @@ def _wall_order(turn: Turn) -> tuple[Pos, ...]:
     front = _front_direction(turn)
     front_x = (xmax + 2) if front > 0 else (xmin - 2)
     back_x = (xmin - 2) if front > 0 else (xmax + 2)
-    horizontal_xs = range(front_x, back_x, -front)
+    # 上下边各少建一个最靠后的墙段，缩短建造时间并保留 C 字防线。
+    horizontal_candidates = list(range(front_x, back_x, -front))
+    horizontal_xs = horizontal_candidates[:-1] if len(horizontal_candidates) > 1 else []
     existing_walls = {wall.pos for wall in turn.walls()}
     candidates = [
         *(Pos(front_x, y) for y in range(ymin - 1, ymax + 2)),

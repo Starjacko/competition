@@ -24,16 +24,18 @@ def command_valid(
 ) -> bool:
     action = command.get("action")
     if action not in {
-        "move", "collect", "build", "attack", "sell",
+        "move", "collect", "build", "remove", "attack", "sell",
         "buy", "acceptTask", "submitAnswer", "use",
     }:
         return False
     if action == "attack":
         return _attack_valid(turn, actor, command)
     role = actor
-    if action == "build" and (not turn.is_day or role.kind != "worker"):
+    if action in {"build", "remove"} and role.kind != "worker":
         return False
-    if action in {"collect", "build"} and role.kind != "worker":
+    if action == "build" and not turn.is_day:
+        return False
+    if action in {"collect", "build", "remove"} and role.kind != "worker":
         return False
     if action in {"acceptTask", "submitAnswer"} and role.kind != PIONEER:
         return False
@@ -67,6 +69,13 @@ def command_valid(
             and distance(role.pos, target) <= 1
             and turn.land(target)
             and target not in turn.occupied_cells()
+        )
+    if action == "remove":
+        target = _load_target(command)
+        return (
+            target is not None
+            and distance(role.pos, target) <= 1
+            and any(wall.pos == target for wall in turn.walls())
         )
     if action == "use":
         name = command.get("name")

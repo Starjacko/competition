@@ -23,7 +23,6 @@ _TASK_FILE_PATTERN = re.compile(
     r"|read(?:\s+(?:the\s+)?file)?\s+([A-Za-z0-9_./-]+\.md)",
     re.IGNORECASE,
 )
-_TASK_FILE_MARKER = "__COREGEEK_TASK_FILE__="
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,12 +168,9 @@ def _task_action(turn: Turn) -> TaskAction:
         return TaskAction()
 
     task_file = _task_file(turn.phase_task)
-    if task_file and not _has_task_file_result(turn.last_cmd_result, task_file):
-        marker = f"{_TASK_FILE_MARKER}{task_file}"
-        command = (
-            f"printf '%s\\n' {shlex.quote(marker)}; "
-            f"cat -- {shlex.quote(task_file)}"
-        )
+    if task_file and not turn.last_cmd_result:
+        # 判题器的沙盒工作目录就是任务文件目录，直接查看并读取目标文件。
+        command = f"ls -la; cat -- {shlex.quote(task_file)}"
         LOGGER.info(
             "task-flow state=read_task_file file=%s execute_cmd=%s",
             task_file,
@@ -191,7 +187,7 @@ def _task_action(turn: Turn) -> TaskAction:
     if task_file:
         prompt += (
             f"已读取文件 {task_file}，以下是沙盒命令输出：\n"
-            f"{_remove_task_file_marker(turn.last_cmd_result)}\n\n"
+            f"{turn.last_cmd_result}\n\n"
         )
     prompt += "请根据以上全部信息直接给出最终可提交答案。"
     return TaskAction(prompt=prompt)
@@ -207,24 +203,3 @@ def _task_file(phase_task: str) -> str | None:
         LOGGER.warning("task-flow rejected unsafe task file=%s", path)
         return None
     return path
-
-
-def _has_task_file_result(last_cmd_result: str, task_file: str) -> bool:
-    """只把当前文件的沙盒输出视为已读取，避免串用上一任务结果。"""
-    marker = f"{_TASK_FILE_MARKER}{task_file}"
-    return any(line == marker for line in last_cmd_result.splitlines())
-
-
-def _remove_task_file_marker(last_cmd_result: str) -> str:
-    """给 LLM 的上下文去掉内部标记，保留实际文件输出。"""
-    lines = last_cmd_result.splitlines()
-    marker_index = next(
-        (
-            index for index, line in enumerate(lines)
-            if line.startswith(_TASK_FILE_MARKER)
-        ),
-        None,
-    )
-    if marker_index is not None:
-        return "\n".join(lines[marker_index + 1:])
-    return last_cmd_result
