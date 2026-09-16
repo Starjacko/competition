@@ -2,6 +2,7 @@ from typing import Any
 
 from .grid import next_step
 from .protocol import (
+    ORE_TYPES,
     PIONEER,
     Pos,
     Turn,
@@ -9,11 +10,13 @@ from .protocol import (
     WALL,
     WALL_MATERIAL,
     WEAPON_BUILD_COST,
-    attack_command,
+    accept_task_command,
     build_command,
     collect_command,
     distance,
+    multi_attack_command,
     move_command,
+    sell_command,
     station_footprint,
 )
 
@@ -48,12 +51,20 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     free_walls = [pos for pos in walls_missing if pos not in occupied]
 
     claimed: set[Pos] = set()
+    planned_gold = turn.gold
     for role in turn.workers():
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
+            planned_gold,
         )
+        command = commands.get(role.unit_id)
+        if command and command.get("action") == "build" and command.get("name") in TOWER_LOADOUT:
+            planned_gold -= WEAPON_BUILD_COST
+    _pioneer_task(turn, commands, claimed)
     for role, tower in _tower_pairs(turn):
         if role.kind != PIONEER:
+            continue
+        if role.unit_id in commands:
             continue
         if distance(role.pos, tower.pos) <= 1 and role.pos not in walls_missing:
             continue
@@ -70,8 +81,9 @@ def _worker_day(
     walls_missing: list[Pos],
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
+    planned_gold: int,
 ) -> None:
-    if towers_missing and turn.gold >= WEAPON_BUILD_COST:
+    if towers_missing and planned_gold >= WEAPON_BUILD_COST:
         for index, site in enumerate(sites):
             if site in towers_missing and site not in claimed:
                 _build_or_walk(
@@ -79,6 +91,7 @@ def _worker_day(
                 )
                 return
     if not walls_missing:
+        _trade_or_mine(turn, role, claimed, commands)
         return
 
     stones = role.backpack.count(WALL_MATERIAL)
@@ -93,7 +106,53 @@ def _worker_day(
                 _build_or_walk(turn, role, site, WALL, claimed, commands)
                 return
         return
-    _mine(turn, role, claimed, commands)
+    _mine(turn, role, claimed, commands, (WALL_MATERIAL,))
+
+
+def _trade_or_mine(
+    turn: Turn,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> None:
+    vendor = _adjacent_zone(turn, role, "vendor")
+    if vendor is not None:
+        for ore in ("iron", "copper", "stone"):
+            amount = role.backpack.count(ore)
+            if amount:
+                commands[role.unit_id] = sell_command(ore, amount)
+                return
+    _mine(turn, role, claimed, commands, ORE_TYPES)
+
+
+def _adjacent_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
+    positions = [
+        pos for pos, zone_kind in turn.zones.items()
+        if zone_kind == kind and distance(role.pos, pos) <= 1
+    ]
+    return min(positions, key=lambda pos: (distance(role.pos, pos), pos.x, pos.y), default=None)
+
+
+def _pioneer_task(turn: Turn, commands: dict[int, dict[str, Any]], claimed: set[Pos]) -> None:
+    pioneers = turn.alive((PIONEER,))
+    if not pioneers or turn.phase_task:
+        return
+    prefix = f"{turn.team_type}TaskPoint"
+    tasks = [
+        task for task in turn.player_tasks
+        if task.get("isValid") and str(task.get("taskType") or "")
+    ]
+    if not tasks:
+        return
+    pioneer = pioneers[0]
+    task = min(tasks, key=lambda value: distance(pioneer.pos, Pos.load(value["taskPosition"])))
+    target = Pos.load(task["taskPosition"])
+    if distance(pioneer.pos, target) <= 1:
+        commands[pioneer.unit_id] = accept_task_command()
+        return
+    step = _step_toward(turn, pioneer, target, claimed)
+    if step is not None:
+        commands[pioneer.unit_id] = move_command(step)
 
 
 def _adjacent_mine(turn: Turn, role: Unit) -> Pos | None:
@@ -113,9 +172,9 @@ def _night(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         if distance(role.pos, tower.pos) <= 1:
             if tower.cooldown > 0:
                 continue
-            target = _attack_target(turn, tower)
-            if target is not None:
-                commands[tower.unit_id] = attack_command(role.unit_id, target)
+            targets = _attack_targets(turn, tower)
+            if targets:
+                commands[tower.unit_id] = multi_attack_command(role.unit_id, targets)
             continue
         step = _step_toward(turn, role, tower.pos, claimed)
         if step is not None:
@@ -126,19 +185,15 @@ def _tower_pairs(turn: Turn) -> tuple[tuple[Unit, Unit], ...]:
     return tuple(zip(turn.controllable(), turn.weapons()))
 
 
-def _attack_target(turn: Turn, tower: Unit) -> Pos | None:
+def _attack_targets(turn: Turn, tower: Unit) -> tuple[Pos, ...]:
     reach = tower.range_of_attack()
     targets = [
         robot for robot in turn.robots
         if robot.health > 0 and distance(tower.pos, robot.pos) <= reach
     ]
-    if not targets:
-        return None
-    nearest = min(
-        targets,
-        key=lambda robot: (distance(tower.pos, robot.pos), robot.robot_id),
-    )
-    return nearest.pos
+    targets.sort(key=lambda robot: (distance(tower.pos, robot.pos), robot.robot_id))
+    count = tower.level if tower.kind in ("gatling", "rocket") else 1
+    return tuple(robot.pos for robot in targets[:count])
 
 
 def _build_or_walk(
@@ -163,11 +218,12 @@ def _mine(
     role: Unit,
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
+    kinds: tuple[str, ...],
 ) -> bool:
     if role.backpack_full:
         return False
     mines = sorted(
-        (pos for pos in turn.stone_mines() if pos not in claimed),
+        (pos for pos, _ in turn.mines(kinds) if pos not in claimed),
         key=lambda pos: (distance(role.pos, pos), pos.x, pos.y),
     )
     for mine in mines:
