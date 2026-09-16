@@ -22,16 +22,18 @@ def decide(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         turn = Turn.load(payload)
         commands: dict[int, dict[str, Any]] = {}
-        prompt = day(turn, commands, _step_toward) if turn.is_day else ""
+        task_action = day(turn, commands, _step_toward) if turn.is_day else None
         if not turn.is_day:
             night(turn, commands, _step_toward)
 
         valid_commands = validated_commands(turn, commands)
-        _log_turn(turn, commands, valid_commands, prompt)
+        prompt = task_action.prompt if task_action else ""
+        execute_cmd = task_action.execute_cmd if task_action else ""
+        _log_turn(turn, commands, valid_commands, prompt, execute_cmd)
         return {
             "roleCommandMap": valid_commands,
             "prompt": prompt,
-            "executeCmd": "",
+            "executeCmd": execute_cmd,
         }
     except Exception:
         LOGGER.exception("decision fallback")
@@ -77,6 +79,7 @@ def _log_turn(
     raw_commands: dict[int, dict[str, Any]],
     valid_commands: dict[str, dict[str, Any]],
     prompt: str,
+    execute_cmd: str,
 ) -> None:
     dropped = {
         str(role_id): command
@@ -103,6 +106,7 @@ def _log_turn(
         "task_active": bool(turn.phase_task),
         "llm_resp": bool(turn.llm_response),
         "prompt_len": len(prompt),
+        "execute_cmd": execute_cmd,
         "raw_commands": {
             str(role_id): command for role_id, command in raw_commands.items()
         },

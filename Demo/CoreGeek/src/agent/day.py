@@ -23,7 +23,7 @@ from .protocol import (
     sell_command,
     use_command,
 )
-from .tasks import pioneer_day
+from .tasks import TaskAction, pioneer_day
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,7 +62,11 @@ class DayPlan:
     tower_build_budget: int
 
 
-def day(turn: Turn, commands: dict[int, dict[str, Any]], step_toward: StepToward) -> str:
+def day(
+    turn: Turn,
+    commands: dict[int, dict[str, Any]],
+    step_toward: StepToward,
+) -> TaskAction:
     """白天主状态机：建塔 -> 建 C 字墙 -> 经济与升级。"""
     claimed: set[Pos] = set()
     plan = _make_day_plan(turn)
@@ -196,30 +200,32 @@ def _pioneer_action(
     commands: dict[int, dict[str, Any]],
     claimed: set[Pos],
     step_toward: StepToward,
-) -> str:
+) -> TaskAction:
     """开拓者优先处理自动化任务；空闲时帮忙卖矿、买券和升级。"""
     pioneer = next(iter(turn.alive((PIONEER,))), None)
     if pioneer is None or pioneer.unit_id in commands:
         LOGGER.info("pioneer-task round=%s state=unavailable", turn.round_no)
-        return ""
+        return TaskAction()
     if use_medicine_if_needed(pioneer, commands):
         LOGGER.info(
             "pioneer-task round=%s state=use_medicine pioneer=%s",
             turn.round_no,
             pioneer.unit_id,
         )
-        return ""
+        return TaskAction()
 
-    prompt = pioneer_day(turn, pioneer, commands, claimed, step_toward)
-    if pioneer.unit_id in commands or prompt:
+    task_action = pioneer_day(turn, pioneer, commands, claimed, step_toward)
+    if pioneer.unit_id in commands or task_action.prompt or task_action.execute_cmd:
         LOGGER.info(
-            "pioneer-task round=%s state=task_action pioneer=%s command=%s prompt_len=%s",
+            "pioneer-task round=%s state=task_action pioneer=%s command=%s "
+            "prompt_len=%s execute_cmd=%s",
             turn.round_no,
             pioneer.unit_id,
             commands.get(pioneer.unit_id),
-            len(prompt),
+            len(task_action.prompt),
+            bool(task_action.execute_cmd),
         )
-        return prompt
+        return task_action
 
     if not _has_available_task(turn):
         _upgrade_or_sell_action(turn, pioneer, claimed, commands, step_toward)
@@ -235,7 +241,7 @@ def _pioneer_action(
             turn.round_no,
             pioneer.unit_id,
         )
-    return prompt
+    return task_action
 
 
 def _tower_worker_action(
