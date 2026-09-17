@@ -121,6 +121,86 @@ class AgentTest(unittest.TestCase):
             "action": "buy", "name": "WallFixer", "num": 1,
         })
 
+    def test_worker_buys_weapon_upgrade_voucher_when_gold_is_available(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        payload["teamOur"]["goldNum"] = 100
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 24, "y": 20}
+        worker["backpack"] = []
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "buy", "name": "WeaponUpgradeVoucher1", "num": 1,
+        })
+
+    def test_worker_uses_upgrade_voucher_next_to_weapon(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 8, "y": 24}
+        worker["backpack"] = ["WeaponUpgradeVoucher1"]
+        gatling = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "gatling")
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "use", "name": "WeaponUpgradeVoucher1",
+            "targetPos": [gatling["pos"]],
+        })
+
+    def test_level_two_weapon_uses_second_upgrade_voucher(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 8, "y": 24}
+        worker["backpack"] = ["WeaponUpgradeVoucher2"]
+        gatling = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "gatling")
+        gatling["level"] = 2
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "use", "name": "WeaponUpgradeVoucher2",
+            "targetPos": [gatling["pos"]],
+        })
+
+    def test_bomb_is_used_only_when_robots_are_dense_near_station(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        payload["robot"]["roles"] = [
+            {"id": 1, "pos": {"x": 11, "y": 24}, "health": 40},
+            {"id": 2, "pos": {"x": 11, "y": 25}, "health": 60},
+        ]
+        worker = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "worker")
+        worker["backpack"] = ["Bomb"]
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "use", "name": "Bomb", "targetPos": [{"x": 11, "y": 25}],
+        })
+
+    def test_bomb_is_not_used_for_a_single_distant_robot(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        payload["robot"]["roles"] = [
+            {"id": 1, "pos": {"x": 30, "y": 10}, "health": 40},
+        ]
+        worker = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "worker")
+        worker["backpack"] = ["Bomb"]
+        response = decide(payload)
+        self.assertNotEqual(response.get(str(worker["id"]), {}).get("action"), "use")
+
+    def test_station_upgrade_is_selected_before_wall_upgrade(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        payload["teamOur"]["goldNum"] = 100
+        payload["teamOur"]["roles"] = [
+            role for role in payload["teamOur"]["roles"]
+            if role["roleType"] not in {"gatling", "railgun", "rocket"}
+        ]
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 24, "y": 20}
+        worker["backpack"] = []
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "buy", "name": "StationUpgradeVoucher1", "num": 1,
+        })
+
     def test_gatling_targets_stay_within_right_angle(self) -> None:
         payload = self.sample()
         payload["roundNo"] = 71

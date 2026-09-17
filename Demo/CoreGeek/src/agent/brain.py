@@ -24,6 +24,13 @@ from .protocol import (
 
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 STONE_BATCH = 6
+UPGRADE_VOUCHERS = {
+    "gatling": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
+    "railgun": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
+    "rocket": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
+    "station": ("StationUpgradeVoucher1", "StationUpgradeVoucher2"),
+    "wall": ("WallUpgradeVoucher1", "WallUpgradeVoucher2"),
+}
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1), (0, 1),
@@ -57,9 +64,12 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     free_walls = [pos for pos in walls_missing if pos not in occupied]
 
     claimed: set[Pos] = set()
+    upgrade_targets: set[Pos] = set()
     planned_gold = [turn.gold]
     for role in turn.workers():
         if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=True):
+            continue
+        if _upgrade(turn, role, commands, claimed, upgrade_targets, planned_gold):
             continue
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
@@ -68,7 +78,7 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         command = commands.get(role.unit_id)
         if command and command.get("action") == "build" and command.get("name") in TOWER_LOADOUT:
             planned_gold[0] -= WEAPON_BUILD_COST
-    _pioneer_task(turn, commands, claimed, planned_gold)
+    _pioneer_task(turn, commands, claimed, planned_gold, upgrade_targets)
     for role, tower in _tower_pairs(turn):
         if role.kind != PIONEER:
             continue
@@ -213,18 +223,21 @@ def _pioneer_task(
     commands: dict[int, dict[str, Any]],
     claimed: set[Pos],
     planned_gold: list[int],
+    upgrade_targets: set[Pos],
 ) -> None:
     pioneers = turn.alive((PIONEER,))
     if not pioneers or turn.phase_task:
+        return
+    pioneer = pioneers[0]
+    if _maintain(turn, pioneer, commands, claimed, planned_gold, allow_shop=True):
+        return
+    if _upgrade(turn, pioneer, commands, claimed, upgrade_targets, planned_gold):
         return
     tasks = [
         task for task in turn.player_tasks
         if task.get("isValid") and str(task.get("taskType") or "")
     ]
     if not tasks:
-        return
-    pioneer = pioneers[0]
-    if _maintain(turn, pioneer, commands, claimed, planned_gold, allow_shop=True):
         return
     task = min(tasks, key=lambda value: distance(pioneer.pos, Pos.load(value["taskPosition"])))
     target = Pos.load(task["taskPosition"])
@@ -250,7 +263,10 @@ def _adjacent_mine(turn: Turn, role: Unit) -> Pos | None:
 def _night(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     claimed: set[Pos] = set()
     planned_gold = [turn.gold]
+    _use_defense_item(turn, commands)
     for role, tower in _tower_pairs(turn):
+        if role.unit_id in commands:
+            continue
         if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=False):
             continue
         if distance(role.pos, tower.pos) <= 1:
@@ -263,6 +279,126 @@ def _night(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         step = _step_toward(turn, role, tower.pos, claimed)
         if step is not None:
             commands[role.unit_id] = move_command(step)
+
+
+def _use_defense_item(turn: Turn, commands: dict[int, dict[str, Any]]) -> bool:
+    station = turn.station()
+    if station is None:
+        return False
+    nearby = [
+        robot for robot in turn.robots
+        if robot.health > 0
+        and min(distance(robot.pos, cell) for cell in turn.footprint(station)) <= 6
+    ]
+    if len(nearby) < 2:
+        return False
+    target = max(
+        nearby,
+        key=lambda robot: (
+            sum(distance(robot.pos, other.pos) <= 1 for other in nearby),
+            robot.health,
+            -robot.robot_id,
+        ),
+    )
+    for item in ("Bomb", "DizzyWeapon"):
+        role = next(
+            (role for role in turn.controllable() if item in role.backpack
+             and role.unit_id not in commands),
+            None,
+        )
+        if role is not None:
+            commands[role.unit_id] = use_command(item, target.pos)
+            return True
+    return False
+
+
+def _upgrade(
+    turn: Turn,
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+    claimed: set[Pos],
+    upgrade_targets: set[Pos],
+    planned_gold: list[int],
+) -> bool:
+    plan = _upgrade_plan(turn, role, upgrade_targets, planned_gold[0])
+    if plan is None:
+        return False
+    target, voucher = plan
+    upgrade_targets.add(target.pos)
+    if voucher not in role.backpack:
+        if role.backpack_full:
+            upgrade_targets.discard(target.pos)
+            return False
+        price = turn.shop_price(voucher)
+        shop = _nearest_zone(turn, role, "weaponShop")
+        if price is None or price > planned_gold[0] or shop is None:
+            upgrade_targets.discard(target.pos)
+            return False
+        if distance(role.pos, shop) <= 1:
+            commands[role.unit_id] = buy_command(voucher)
+            planned_gold[0] -= price
+            return True
+        step = _step_toward(turn, role, shop, claimed)
+        if step is not None:
+            commands[role.unit_id] = move_command(step)
+            return True
+        upgrade_targets.discard(target.pos)
+        return False
+    if _building_distance(turn, role, target) <= 1:
+        commands[role.unit_id] = use_command(voucher, target.pos)
+        return True
+    step = _step_toward(turn, role, target.pos, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
+    upgrade_targets.discard(target.pos)
+    return False
+
+
+def _upgrade_plan(
+    turn: Turn,
+    role: Unit,
+    upgrade_targets: set[Pos],
+    available_gold: int,
+) -> tuple[Unit, str] | None:
+    candidates: list[tuple[int, int, int, int, int, Unit, str]] = []
+    station = turn.station()
+    buildings = (*turn.weapons(), *((station,) if station else ()), *turn.walls())
+    for building in buildings:
+        if building.pos in upgrade_targets or building.level >= 3:
+            continue
+        vouchers = UPGRADE_VOUCHERS.get(building.kind)
+        if vouchers is None:
+            continue
+        voucher = vouchers[building.level - 1] if 1 <= building.level <= 2 else None
+        if voucher is None:
+            continue
+        carried = voucher in role.backpack
+        if not carried:
+            price = turn.shop_price(voucher)
+            if role.backpack_full or price is None or price > available_gold:
+                continue
+        kind_priority = 0 if building.kind in TOWER_LOADOUT else 1 if building.kind == "station" else 2
+        candidates.append((
+            0 if carried else 1,
+            kind_priority,
+            building.level,
+            _building_distance(turn, role, building),
+            building.unit_id,
+            building,
+            voucher,
+        ))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[:5])
+    _, _, _, _, _, target, voucher = candidates[0]
+    return target, voucher
+
+
+def _building_distance(turn: Turn, role: Unit, building: Unit) -> int:
+    return min(
+        distance(role.pos, cell) for cell in turn.footprint(building)
+    )
 
 
 def _tower_pairs(turn: Turn) -> tuple[tuple[Unit, Unit], ...]:
