@@ -226,6 +226,15 @@ class Turn:
             pos for pos, kind in self.zones.items() if kind == WALL_MATERIAL
         )
 
+    def action_failed(self, unit_id: int) -> bool:
+        return bool(self.last_action_results and self.last_action_results.get(unit_id) is False)
+
+    def shop_price(self, item_name: str) -> int | None:
+        for item in self.weapon_shop:
+            if item.get("name") == item_name:
+                return int(item.get("price") or 0)
+        return None
+
     def footprint(self, unit: Unit) -> tuple[Pos, ...]:
         if unit.kind == STATION:
             return station_footprint(unit.pos)

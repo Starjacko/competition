@@ -11,6 +11,7 @@ from .protocol import (
     WALL_MATERIAL,
     WEAPON_BUILD_COST,
     accept_task_command,
+    buy_command,
     build_command,
     collect_command,
     distance,
@@ -37,6 +38,10 @@ def decide(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         _day(turn, commands)
     else:
         _night(turn, commands)
+    commands = {
+        unit_id: command for unit_id, command in commands.items()
+        if not (turn.action_failed(unit_id) and command.get("action") != "move")
+    }
     return {str(key): value for key, value in commands.items()}
 
 
@@ -52,18 +57,18 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     free_walls = [pos for pos in walls_missing if pos not in occupied]
 
     claimed: set[Pos] = set()
-    planned_gold = turn.gold
+    planned_gold = [turn.gold]
     for role in turn.workers():
-        if _maintain(turn, role, commands):
+        if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=True):
             continue
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
-            planned_gold,
+            planned_gold[0],
         )
         command = commands.get(role.unit_id)
         if command and command.get("action") == "build" and command.get("name") in TOWER_LOADOUT:
-            planned_gold -= WEAPON_BUILD_COST
-    _pioneer_task(turn, commands, claimed)
+            planned_gold[0] -= WEAPON_BUILD_COST
+    _pioneer_task(turn, commands, claimed, planned_gold)
     for role, tower in _tower_pairs(turn):
         if role.kind != PIONEER:
             continue
@@ -148,11 +153,46 @@ def _nearest_zone(turn: Turn, role: Unit, kind: str) -> Pos | None:
     return min(positions, key=lambda pos: (distance(role.pos, pos), pos.x, pos.y), default=None)
 
 
-def _maintain(turn: Turn, role: Unit, commands: dict[int, dict[str, Any]]) -> bool:
+def _maintain(
+    turn: Turn,
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+    claimed: set[Pos],
+    planned_gold: list[int],
+    *,
+    allow_shop: bool,
+) -> bool:
     if role.damaged and "Medicine" in role.backpack:
         commands[role.unit_id] = use_command("Medicine")
         return True
+    if role.damaged and allow_shop and not role.backpack_full:
+        price = turn.shop_price("Medicine")
+        shop = _nearest_zone(turn, role, "weaponShop")
+        if price is not None and price <= planned_gold[0] and shop is not None:
+            if distance(role.pos, shop) <= 1:
+                commands[role.unit_id] = buy_command("Medicine")
+                planned_gold[0] -= price
+                return True
+            step = _step_toward(turn, role, shop, claimed)
+            if step is not None:
+                commands[role.unit_id] = move_command(step)
+                return True
     if "WallFixer" not in role.backpack:
+        damaged_walls = [wall for wall in turn.walls() if wall.damaged]
+        if not (damaged_walls and allow_shop and role.kind == "worker" and not role.backpack_full):
+            return False
+        price = turn.shop_price("WallFixer")
+        shop = _nearest_zone(turn, role, "weaponShop")
+        if price is None or price > planned_gold[0] or shop is None:
+            return False
+        if distance(role.pos, shop) <= 1:
+            commands[role.unit_id] = buy_command("WallFixer")
+            planned_gold[0] -= price
+            return True
+        step = _step_toward(turn, role, shop, claimed)
+        if step is not None:
+            commands[role.unit_id] = move_command(step)
+            return True
         return False
     damaged_walls = [wall for wall in turn.walls() if wall.damaged]
     if not damaged_walls:
@@ -161,10 +201,19 @@ def _maintain(turn: Turn, role: Unit, commands: dict[int, dict[str, Any]]) -> bo
     if distance(role.pos, target.pos) <= 1:
         commands[role.unit_id] = use_command("WallFixer", target.pos)
         return True
+    step = _step_toward(turn, role, target.pos, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
     return False
 
 
-def _pioneer_task(turn: Turn, commands: dict[int, dict[str, Any]], claimed: set[Pos]) -> None:
+def _pioneer_task(
+    turn: Turn,
+    commands: dict[int, dict[str, Any]],
+    claimed: set[Pos],
+    planned_gold: list[int],
+) -> None:
     pioneers = turn.alive((PIONEER,))
     if not pioneers or turn.phase_task:
         return
@@ -175,6 +224,8 @@ def _pioneer_task(turn: Turn, commands: dict[int, dict[str, Any]], claimed: set[
     if not tasks:
         return
     pioneer = pioneers[0]
+    if _maintain(turn, pioneer, commands, claimed, planned_gold, allow_shop=True):
+        return
     task = min(tasks, key=lambda value: distance(pioneer.pos, Pos.load(value["taskPosition"])))
     target = Pos.load(task["taskPosition"])
     if distance(pioneer.pos, target) <= 1:
@@ -198,8 +249,9 @@ def _adjacent_mine(turn: Turn, role: Unit) -> Pos | None:
 
 def _night(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     claimed: set[Pos] = set()
+    planned_gold = [turn.gold]
     for role, tower in _tower_pairs(turn):
-        if _maintain(turn, role, commands):
+        if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=False):
             continue
         if distance(role.pos, tower.pos) <= 1:
             if tower.cooldown > 0:

@@ -23,7 +23,9 @@ from agent.protocol import (  # noqa: E402
 
 class AgentTest(unittest.TestCase):
     def sample(self) -> dict:
-        return json.loads((Path(__file__).parents[3] / "docs" / "request.txt").read_text(encoding="utf-8"))
+        payload = json.loads((Path(__file__).parents[3] / "docs" / "request.txt").read_text(encoding="utf-8"))
+        payload.pop("lastRoundRoleActionResults", None)
+        return payload
 
     def test_sample_request_produces_commands(self) -> None:
         payload = self.sample()
@@ -64,6 +66,26 @@ class AgentTest(unittest.TestCase):
         response = decide(payload)
         self.assertEqual(response[str(worker["id"])], {"action": "use", "name": "Medicine"})
 
+    def test_injured_worker_buys_medicine_when_next_to_shop(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 24, "y": 20}
+        worker["health"] = 100
+        worker["backpack"] = []
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "buy", "name": "Medicine", "num": 1,
+        })
+
+    def test_failed_non_move_action_is_not_immediately_repeated(self) -> None:
+        payload = self.sample()
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["health"] = 100
+        worker["backpack"] = ["Medicine"]
+        payload["lastRoundRoleActionResults"] = {str(worker["id"]): False}
+        self.assertNotIn(str(worker["id"]), decide(payload))
+
     def test_worker_with_ore_walks_to_vendor_before_mining_more(self) -> None:
         payload = self.sample()
         payload["teamOur"]["roles"] = [
@@ -84,6 +106,19 @@ class AgentTest(unittest.TestCase):
         response = decide(payload)
         self.assertEqual(response[str(worker["id"])], {
             "action": "use", "name": "WallFixer", "targetPos": [wall["pos"]],
+        })
+
+    def test_worker_buys_wall_fixer_when_next_to_shop(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 24, "y": 20}
+        worker["backpack"] = []
+        wall = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "wall")
+        wall["health"] = 500
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "buy", "name": "WallFixer", "num": 1,
         })
 
     def test_gatling_targets_stay_within_right_angle(self) -> None:
