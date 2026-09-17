@@ -235,6 +235,12 @@ class Turn:
                 return int(item.get("price") or 0)
         return None
 
+    def vendor_price(self, item_name: str) -> int | None:
+        for item in self.vendor_shop:
+            if item.get("name") == item_name:
+                return int(item.get("price") or 0)
+        return None
+
     def footprint(self, unit: Unit) -> tuple[Pos, ...]:
         if unit.kind == STATION:
             return station_footprint(unit.pos)

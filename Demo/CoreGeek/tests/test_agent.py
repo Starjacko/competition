@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from agent.brain import decide  # noqa: E402
+from agent.brain import _trade_or_mine, decide  # noqa: E402
 from agent.protocol import (  # noqa: E402
     Pos,
     Turn,
@@ -95,6 +95,24 @@ class AgentTest(unittest.TestCase):
         worker["backpack"] = ["iron"]
         response = decide(payload)
         self.assertEqual(response[str(worker["id"])]["action"], "move")
+
+    def test_worker_sells_the_most_expensive_ore_at_vendor(self) -> None:
+        payload = self.sample()
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 19, "y": 16}
+        worker["backpack"] = ["iron", "copper", "stone"]
+        payload["vendorShopList"] = [
+            {"name": "stone", "price": 8},
+            {"name": "iron", "price": 2},
+            {"name": "copper", "price": 5},
+        ]
+        turn = Turn.load(payload)
+        role = next(role for role in turn.workers() if role.unit_id == worker["id"])
+        commands = {}
+        _trade_or_mine(turn, role, set(), commands)
+        self.assertEqual(commands[role.unit_id], {
+            "action": "sell", "name": "stone", "num": 1,
+        })
 
     def test_wall_fixer_is_used_when_adjacent_to_damaged_wall(self) -> None:
         payload = self.sample()
@@ -185,6 +203,54 @@ class AgentTest(unittest.TestCase):
         response = decide(payload)
         self.assertNotEqual(response.get(str(worker["id"]), {}).get("action"), "use")
 
+    def test_worker_buys_bomb_after_buildings_are_fully_upgraded(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        payload["teamOur"]["goldNum"] = 100
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 24, "y": 20}
+        worker["backpack"] = []
+        for role in payload["teamOur"]["roles"]:
+            if role["roleType"] in {"station", "gatling", "railgun", "rocket", "wall"}:
+                role["level"] = 3
+                role["health"] = 2000 if role["roleType"] == "wall" else role["health"]
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "buy", "name": "Bomb", "num": 1,
+        })
+
+    def test_worker_uses_robot_summon_order_during_day(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["backpack"] = ["SmallRobotSummonOrder"]
+        response = decide(payload)
+        self.assertEqual(response[str(worker["id"])], {
+            "action": "use", "name": "SmallRobotSummonOrder",
+        })
+
+    def test_robot_summon_order_is_not_used_at_night(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["backpack"] = ["SmallRobotSummonOrder"]
+        response = decide(payload)
+        self.assertNotEqual(
+            response.get(str(worker["id"]), {}).get("name"),
+            "SmallRobotSummonOrder",
+        )
+
+    def test_robot_summon_order_is_not_used_after_daily_limit_window(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 11
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["backpack"] = ["SmallRobotSummonOrder"]
+        response = decide(payload)
+        self.assertNotEqual(
+            response.get(str(worker["id"]), {}).get("name"),
+            "SmallRobotSummonOrder",
+        )
+
     def test_station_upgrade_is_selected_before_wall_upgrade(self) -> None:
         payload = self.sample()
         payload["roundNo"] = 1
@@ -217,6 +283,22 @@ class AgentTest(unittest.TestCase):
         targets = response[str(gatling["id"])]["targetPos"]
         self.assertLessEqual(len(targets), 3)
         self.assertNotIn({"x": 7, "y": 24}, targets)
+
+    def test_upgraded_gatling_fills_all_target_slots(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        payload["robot"]["roles"] = [
+            {"id": 1, "pos": {"x": 11, "y": 24}, "health": 40},
+        ]
+        gatling = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "gatling")
+        gatling["level"] = 3
+        worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
+        worker["pos"] = {"x": 8, "y": 24}
+        response = decide(payload)
+        targets = response[str(gatling["id"])]["targetPos"]
+        self.assertEqual(targets, [
+            {"x": 11, "y": 24}, {"x": 11, "y": 24}, {"x": 11, "y": 24},
+        ])
 
 
 if __name__ == "__main__":

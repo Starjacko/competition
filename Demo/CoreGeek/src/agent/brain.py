@@ -24,6 +24,12 @@ from .protocol import (
 
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 STONE_BATCH = 6
+SUMMON_ORDERS = (
+    "BossRobotSummonOrder",
+    "LargeRobotSummonOrder",
+    "MiddleRobotSummonOrder",
+    "SmallRobotSummonOrder",
+)
 UPGRADE_VOUCHERS = {
     "gatling": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
     "railgun": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
@@ -70,6 +76,10 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
         if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=True):
             continue
         if _upgrade(turn, role, commands, claimed, upgrade_targets, planned_gold):
+            continue
+        if _buy_defense_item(turn, role, commands, claimed, planned_gold):
+            continue
+        if _use_summon_order(turn, role, commands):
             continue
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
@@ -135,11 +145,20 @@ def _trade_or_mine(
 ) -> None:
     vendor = _adjacent_zone(turn, role, "vendor")
     if vendor is not None:
-        for ore in ("iron", "copper", "stone"):
-            amount = role.backpack.count(ore)
-            if amount:
-                commands[role.unit_id] = sell_command(ore, amount)
-                return
+        ores = [
+            (
+                turn.vendor_price(ore) if turn.vendor_price(ore) is not None else -1,
+                priority,
+                ore,
+                role.backpack.count(ore),
+            )
+            for priority, ore in enumerate(("iron", "copper", "stone"))
+            if role.backpack.count(ore)
+        ]
+        if ores:
+            _, _, ore, amount = max(ores)
+            commands[role.unit_id] = sell_command(ore, amount)
+            return
     if any(role.backpack.count(ore) for ore in ORE_TYPES):
         vendor_target = _nearest_zone(turn, role, "vendor")
         if vendor_target is not None:
@@ -303,13 +322,73 @@ def _use_defense_item(turn: Turn, commands: dict[int, dict[str, Any]]) -> bool:
     for item in ("Bomb", "DizzyWeapon"):
         role = next(
             (role for role in turn.controllable() if item in role.backpack
-             and role.unit_id not in commands),
+             and not role.damaged and role.unit_id not in commands),
             None,
         )
         if role is not None:
             commands[role.unit_id] = use_command(item, target.pos)
             return True
     return False
+
+
+def _buy_defense_item(
+    turn: Turn,
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+    claimed: set[Pos],
+    planned_gold: list[int],
+) -> bool:
+    if role.backpack_full or any(item in role.backpack for item in ("Bomb", "DizzyWeapon")):
+        return False
+    item = next(
+        (
+            item for item in ("Bomb", "DizzyWeapon")
+            if turn.shop_price(item) is not None
+            and turn.shop_price(item) <= planned_gold[0]
+        ),
+        None,
+    )
+    shop = _nearest_zone(turn, role, "weaponShop")
+    if item is None or shop is None:
+        return False
+    if distance(role.pos, shop) <= 1:
+        commands[role.unit_id] = buy_command(item)
+        planned_gold[0] -= turn.shop_price(item) or 0
+        return True
+    step = _step_toward(turn, role, shop, claimed)
+    if step is not None:
+        commands[role.unit_id] = move_command(step)
+        return True
+    return False
+
+
+def _use_summon_order(
+    turn: Turn,
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    """Use one summon order during daytime; the server applies it next night."""
+    if role.unit_id in commands:
+        return False
+    # 每个游戏日只在白天前10回合主动使用，最多消耗10张。
+    if (turn.round_no - 1) % 130 >= 10:
+        return False
+    order = next((item for item in SUMMON_ORDERS if item in role.backpack), None)
+    if order is None:
+        return False
+    return _set_use_command(turn, role, commands, order)
+
+
+def _set_use_command(
+    turn: Turn,
+    role: Unit,
+    commands: dict[int, dict[str, Any]],
+    item: str,
+) -> bool:
+    if turn.action_failed(role.unit_id):
+        return False
+    commands[role.unit_id] = use_command(item)
+    return True
 
 
 def _upgrade(
@@ -416,8 +495,12 @@ def _attack_targets(turn: Turn, tower: Unit) -> tuple[Pos, ...]:
     targets.sort(key=lambda robot: (distance(tower.pos, robot.pos), robot.robot_id))
     count = tower.level if tower.kind in ("gatling", "rocket") else 1
     if tower.kind == "gatling":
-        return _gatling_targets(tower, targets, count)
-    return tuple(robot.pos for robot in targets[:count])
+        selected = _gatling_targets(tower, targets, count)
+    else:
+        selected = tuple(robot.pos for robot in targets[:count])
+    if selected and len(selected) < count:
+        selected += (selected[-1],) * (count - len(selected))
+    return selected
 
 
 def _gatling_targets(tower: Unit, robots: list[Any], count: int) -> tuple[Pos, ...]:
