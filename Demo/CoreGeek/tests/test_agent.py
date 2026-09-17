@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from agent.brain import _trade_or_mine, decide  # noqa: E402
+from agent.brain import _attack_targets, _trade_or_mine, decide  # noqa: E402
 from agent.protocol import (  # noqa: E402
     Pos,
     Turn,
@@ -222,8 +222,12 @@ class AgentTest(unittest.TestCase):
     def test_worker_uses_robot_summon_order_during_day(self) -> None:
         payload = self.sample()
         payload["roundNo"] = 1
+        payload["teamOur"]["goldNum"] = 0
         worker = next(role for role in payload["teamOur"]["roles"] if role["id"] == 10010)
         worker["backpack"] = ["SmallRobotSummonOrder"]
+        for role in payload["teamOur"]["roles"]:
+            if role["roleType"] == "wall":
+                role["health"] = 1000
         response = decide(payload)
         self.assertEqual(response[str(worker["id"])], {
             "action": "use", "name": "SmallRobotSummonOrder",
@@ -250,6 +254,54 @@ class AgentTest(unittest.TestCase):
             response.get(str(worker["id"]), {}).get("name"),
             "SmallRobotSummonOrder",
         )
+
+    def test_only_one_robot_summon_order_is_used_per_round(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        payload["teamOur"]["goldNum"] = 0
+        for role in payload["teamOur"]["roles"]:
+            if role["roleType"] == "worker":
+                role["health"] = 220
+                role["backpack"] = ["SmallRobotSummonOrder"]
+            if role["roleType"] == "wall":
+                role["health"] = 1000
+        response = decide(payload)
+        summon_commands = [
+            command for command in response.values()
+            if command.get("name") == "SmallRobotSummonOrder"
+        ]
+        self.assertEqual(len(summon_commands), 1)
+
+    def test_pioneer_stays_at_task_point_while_task_is_active(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 1
+        payload["phaseTask"] = "请先完成当前任务"
+        payload["teamOur"]["goldNum"] = 0
+        pioneer = next(role for role in payload["teamOur"]["roles"] if role["roleType"] == "pioneer")
+        pioneer["health"] = 200
+        pioneer["backpack"] = []
+        for role in payload["teamOur"]["roles"]:
+            if role["roleType"] == "wall":
+                role["health"] = 1000
+        response = decide(payload)
+        self.assertNotIn(str(pioneer["id"]), response)
+
+    def test_boss_robot_is_prioritized_when_it_targets_our_team(self) -> None:
+        payload = self.sample()
+        payload["roundNo"] = 71
+        payload["robot"]["roles"] = [
+            {
+                "id": 1, "pos": {"x": 10, "y": 24}, "roleType": "smallRobot",
+                "health": 40, "targetTeam": "challenger",
+            },
+            {
+                "id": 2, "pos": {"x": 11, "y": 24}, "roleType": "bossRobot",
+                "health": 40, "targetTeam": "challenger",
+            },
+        ]
+        turn = Turn.load(payload)
+        tower = next(role for role in turn.weapons() if role.kind == "gatling")
+        self.assertEqual(_attack_targets(turn, tower), (Pos(11, 24),))
 
     def test_station_upgrade_is_selected_before_wall_upgrade(self) -> None:
         payload = self.sample()

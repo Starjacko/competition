@@ -111,6 +111,7 @@ class Robot:
     robot_id: int
     pos: Pos
     health: int
+    kind: str = ""
     abnormal_state: str = ""
     target_team: str = ""
 
@@ -118,6 +119,7 @@ class Robot:
     def load(cls, raw: dict[str, Any]) -> "Robot":
         return cls(
             int(raw["id"]), Pos.load(raw["pos"]), int(raw["health"]),
+            str(raw.get("roleType") or ""),
             str(raw.get("abnormalState") or ""),
             str(raw.get("targetTeam") or ""),
         )

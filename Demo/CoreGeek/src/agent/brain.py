@@ -30,6 +30,12 @@ SUMMON_ORDERS = (
     "MiddleRobotSummonOrder",
     "SmallRobotSummonOrder",
 )
+ROBOT_PRIORITY = {
+    "bossRobot": 0,
+    "largeRobot": 1,
+    "middleRobot": 2,
+    "smallRobot": 3,
+}
 UPGRADE_VOUCHERS = {
     "gatling": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
     "railgun": ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"),
@@ -72,6 +78,7 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     claimed: set[Pos] = set()
     upgrade_targets: set[Pos] = set()
     planned_gold = [turn.gold]
+    summon_order_used = False
     for role in turn.workers():
         if _maintain(turn, role, commands, claimed, planned_gold, allow_shop=True):
             continue
@@ -79,7 +86,8 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
             continue
         if _buy_defense_item(turn, role, commands, claimed, planned_gold):
             continue
-        if _use_summon_order(turn, role, commands):
+        if not summon_order_used and _use_summon_order(turn, role, commands):
+            summon_order_used = True
             continue
         _worker_day(
             turn, role, sites, free_towers, free_walls, claimed, commands,
@@ -91,6 +99,9 @@ def _day(turn: Turn, commands: dict[int, dict[str, Any]]) -> None:
     _pioneer_task(turn, commands, claimed, planned_gold, upgrade_targets)
     for role, tower in _tower_pairs(turn):
         if role.kind != PIONEER:
+            continue
+        # 任务进行中时，离开任务点周围一格会直接结束任务。
+        if turn.phase_task:
             continue
         if role.unit_id in commands:
             continue
@@ -307,6 +318,7 @@ def _use_defense_item(turn: Turn, commands: dict[int, dict[str, Any]]) -> bool:
     nearby = [
         robot for robot in turn.robots
         if robot.health > 0
+        and (not robot.target_team or robot.target_team == turn.team_type)
         and min(distance(robot.pos, cell) for cell in turn.footprint(station)) <= 6
     ]
     if len(nearby) < 2:
@@ -370,7 +382,7 @@ def _use_summon_order(
     """Use one summon order during daytime; the server applies it next night."""
     if role.unit_id in commands:
         return False
-    # 每个游戏日只在白天前10回合主动使用，最多消耗10张。
+    # 每天只在白天前10回合使用；_day 保证每回合最多一张，合计最多10张。
     if (turn.round_no - 1) % 130 >= 10:
         return False
     order = next((item for item in SUMMON_ORDERS if item in role.backpack), None)
@@ -492,7 +504,11 @@ def _attack_targets(turn: Turn, tower: Unit) -> tuple[Pos, ...]:
     ]
     threatening = [robot for robot in targets if robot.target_team == turn.team_type]
     targets = threatening or targets
-    targets.sort(key=lambda robot: (distance(tower.pos, robot.pos), robot.robot_id))
+    targets.sort(key=lambda robot: (
+        ROBOT_PRIORITY.get(robot.kind, len(ROBOT_PRIORITY)),
+        distance(tower.pos, robot.pos),
+        robot.robot_id,
+    ))
     count = tower.level if tower.kind in ("gatling", "rocket") else 1
     if tower.kind == "gatling":
         selected = _gatling_targets(tower, targets, count)
